@@ -21,4 +21,9 @@ services:
       - POST_PROCESSING=-1
       - QUEUE_IMMEDIATELY=false
       - PROGRESS_INTERVAL=15
+      # Default internal port for the web server. Can be overridden.
+      - WEB_PORT=5151
+    ports:
+      # Map host port (HOST_WEB_PORT env var, default 5151) to container port (WEB_PORT env var)
+      - "${HOST_WEB_PORT:-5151}:${WEB_PORT}"
     restart: unless-stopped

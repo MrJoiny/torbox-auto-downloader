@@ -23,6 +23,7 @@ ENV SEED_PREFERENCE="1"
 ENV POST_PROCESSING="-1"
 ENV QUEUE_IMMEDIATELY="false"
 ENV PROGRESS_INTERVAL="15"
+ENV WEB_PORT="5151"
 
 # The TORBOX_API_KEY is intentionally left unset here.
 # It must be provided by the user when running the container.

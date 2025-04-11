@@ -126,20 +126,17 @@ class TorBoxWatcherApp:
                 logger.info(
                     f"Successfully submitted torrent: {file_name}, ID: {identifier}"
                 )
-                self.download_tracker.track_download(
-                    identifier,
-                    "torrent",
-                    file_path.stem,
-                    file_path,
-                    identifier, # Use the determined identifier
-                    "torrent",
-                    file_path.stem,
-                    file_path,
-                    download_id, # Pass specific ID
-                    torrent_hash, # Pass hash
+                # Corrected call to track_download using keyword arguments
+                success = self.download_tracker.track_download(
+                    identifier=identifier,
+                    download_type="torrent",
+                    file_stem=file_path.stem,
+                    original_file=file_path,
+                    download_id=download_id,
+                    download_hash=torrent_hash
                 )
                 # track_download now returns True/False
-                return True, file_path, identifier # Keep returning True for file deletion logic
+                return success, file_path, identifier # Return actual success status
             else:
                 logger.error(
                     f"Failed to get download ID for: {file_name}. Response: {json.dumps(response_data)}"
@@ -304,20 +301,17 @@ class TorBoxWatcherApp:
                 logger.info(
                     f"Successfully submitted NZB: {file_name}, ID: {identifier}"
                 )
-                self.download_tracker.track_download(
-                    identifier,
-                    "usenet",
-                    file_path.stem,
-                    file_path,
-                    identifier, # Use the determined identifier
-                    "usenet",
-                    file_path.stem,
-                    file_path,
-                    download_id, # Pass specific ID
-                    download_hash, # Pass hash
+                # Corrected call to track_download using keyword arguments
+                success = self.download_tracker.track_download(
+                    identifier=identifier,
+                    download_type="usenet",
+                    file_stem=file_path.stem,
+                    original_file=file_path,
+                    download_id=download_id,
+                    download_hash=download_hash
                 )
                 # track_download now returns True/False
-                return True, file_path, identifier # Keep returning True for file deletion logic
+                return success, file_path, identifier # Return actual success status
             else:
                 logger.error(
                     f"Failed to get download ID or hash for NZB: {file_name}. Response: {json.dumps(response_data)}"

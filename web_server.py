@@ -26,6 +26,58 @@ def serve_static(filename):
     """Serves static files (CSS, JS)."""
     return send_from_directory(app.static_folder, filename)
 
+def _fetch_download_list(api_method, download_type, query_params="bypass_cache=true&limit=1000"):
+    """
+    Helper function to fetch and parse download list from TorBox API.
+
+    Args:
+        api_method: The API method to call (get_torrent_list or get_usenet_list).
+        download_type (str): Either "torrent" or "usenet".
+        query_params (str): Query parameters for the API call.
+
+    Returns:
+        list: List of parsed download items.
+    """
+    items = []
+    try:
+        logger.info(f"Fetching {download_type} list from TorBox API...")
+        data = api_method(query_params)
+        if data.get("success") and isinstance(data.get("data"), list):
+            for item in data["data"]:
+                items.append({
+                    "id": item.get("id"),
+                    "hash": item.get("hash"),
+                    "name": item.get("name", "N/A"),
+                    "status": item.get("download_state", "N/A"),
+                    "progress": float(item.get("progress", 0)) * 100,
+                    "size": item.get("size", 0),
+                    "type": download_type,
+                    "created_at": item.get("created_at")
+                })
+        else:
+            logger.warning(f"Failed to fetch or parse {download_type} list: {data.get('detail', 'Unknown error')}")
+    except Exception as e:
+        logger.error(f"Error fetching {download_type} list: {e}")
+    
+    return items
+
+def _parse_datetime_safe(date_str):
+    """
+    Safely parse datetime string, returning datetime.min on failure.
+
+    Args:
+        date_str (str): ISO format datetime string.
+
+    Returns:
+        datetime: Parsed datetime or datetime.min.
+    """
+    if date_str:
+        try:
+            return datetime.fromisoformat(date_str.split('+')[0])
+        except (ValueError, TypeError):
+            logger.warning(f"Could not parse date string: {date_str}")
+    return datetime.min
+
 @app.route('/api/downloads', methods=['GET'])
 def get_downloads():
     """
@@ -36,64 +88,22 @@ def get_downloads():
         logger.error("Watcher app instance or API client not available.")
         return jsonify({"error": "Server not properly configured"}), 500
 
-    combined_list = []
     try:
-        # Fetch Torrents
-        logger.info("Fetching torrent list from TorBox API...")
-        # Use bypass_cache=True for potentially fresher data, adjust if needed
-        torrent_data = watcher_app_instance.api_client.get_torrent_list("bypass_cache=true&limit=1000") # Adjust limit as needed
-        if torrent_data.get("success") and isinstance(torrent_data.get("data"), list):
-            for item in torrent_data["data"]:
-                combined_list.append({
-                    "id": item.get("id"),
-                    "hash": item.get("hash"), # Include hash as potential identifier
-                    "name": item.get("name", "N/A"),
-                    "status": item.get("download_state", "N/A"),
-                    "progress": float(item.get("progress", 0)) * 100,
-                    "size": item.get("size", 0), # Consider formatting size later (e.g., using humanize)
-                    "type": "torrent",
-                    "created_at": item.get("created_at") # Add created_at
-                })
-        else:
-             logger.warning(f"Failed to fetch or parse torrent list: {torrent_data.get('detail', 'Unknown error')}")
+        combined_list = []
+        
+        # Fetch torrents and usenet downloads
+        combined_list.extend(_fetch_download_list(
+            watcher_app_instance.api_client.get_torrent_list, "torrent"
+        ))
+        combined_list.extend(_fetch_download_list(
+            watcher_app_instance.api_client.get_usenet_list, "usenet"
+        ))
 
-
-        # Fetch Usenet
-        logger.info("Fetching usenet list from TorBox API...")
-        usenet_data = watcher_app_instance.api_client.get_usenet_list("bypass_cache=true&limit=1000") # Adjust limit as needed
-        if usenet_data.get("success") and isinstance(usenet_data.get("data"), list):
-             for item in usenet_data["data"]:
-                combined_list.append({
-                    "id": item.get("id"),
-                    "hash": item.get("hash"), # Include hash as potential identifier
-                    "name": item.get("name", "N/A"),
-                    "status": item.get("download_state", "N/A"),
-                    "progress": float(item.get("progress", 0)) * 100,
-                    "size": item.get("size", 0), # Consider formatting size later
-                    "type": "usenet",
-                    "created_at": item.get("created_at") # Add created_at
-                })
-        else:
-             logger.warning(f"Failed to fetch or parse usenet list: {usenet_data.get('detail', 'Unknown error')}")
-
-        # Sort the combined list by 'created_at' date, newest first
-        # Handle potential None or invalid date strings gracefully
-        def get_datetime(item):
-            date_str = item.get('created_at')
-            if date_str:
-                try:
-                    # Adjust format if timezone info is present and needs handling
-                    # Example assumes ISO format like '2023-12-22T22:12:34.78989+00:00'
-                    # Python < 3.11 might need manual timezone handling or external library like dateutil
-                    # For simplicity here, we parse up to microseconds, ignoring timezone offset for sorting comparison
-                    # If timezone matters for exact ordering across zones, use dateutil.parser.isoparse
-                    return datetime.fromisoformat(date_str.split('+')[0]) # Basic parsing
-                except (ValueError, TypeError):
-                    logger.warning(f"Could not parse date string: {date_str} for item {item.get('id')}")
-                    return datetime.min # Assign a minimum date for items with bad dates
-            return datetime.min # Assign a minimum date for items without a date
-
-        combined_list.sort(key=get_datetime, reverse=True) # reverse=True for descending
+        # Sort by created_at date, newest first
+        combined_list.sort(
+            key=lambda item: _parse_datetime_safe(item.get('created_at')),
+            reverse=True
+        )
 
         logger.info(f"Returning {len(combined_list)} sorted items from API.")
         return jsonify(combined_list)

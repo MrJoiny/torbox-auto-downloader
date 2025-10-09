@@ -131,6 +131,24 @@ class TorBoxAPIClient:
         endpoint = "/torrents/createtorrent"
         return self._post(endpoint, payload=payload)
 
+    def _parse_query_string(self, query_param):
+        """
+        Parses a query string into a dictionary.
+
+        Args:
+            query_param (str): Query string like "key1=value1&key2=value2".
+
+        Returns:
+            dict: Parsed parameters as a dictionary.
+        """
+        params = {}
+        if query_param:
+            for param in query_param.split('&'):
+                if '=' in param:
+                    key, value = param.split('=', 1)
+                    params[key] = value
+        return params if params else None
+
     def get_torrent_list(self, query_param=None):
         """
         Retrieves the list of torrents from the TorBox API.
@@ -142,14 +160,8 @@ class TorBoxAPIClient:
             dict: The API response.
         """
         endpoint = "/torrents/mylist"
-        # Parse query_param string into dict if provided
-        params = {}
-        if query_param:
-            for param in query_param.split('&'):
-                if '=' in param:
-                    key, value = param.split('=', 1)
-                    params[key] = value
-        return self._get(endpoint, params=params if params else None)
+        params = self._parse_query_string(query_param)
+        return self._get(endpoint, params=params)
 
     def request_torrent_download_link(self, torrent_id):
         """
@@ -193,14 +205,8 @@ class TorBoxAPIClient:
             dict: The API response.
         """
         endpoint = "/usenet/mylist"
-        # Parse query_param string into dict if provided
-        params = {}
-        if query_param:
-            for param in query_param.split('&'):
-                if '=' in param:
-                    key, value = param.split('=', 1)
-                    params[key] = value
-        return self._get(endpoint, params=params if params else None)
+        params = self._parse_query_string(query_param)
+        return self._get(endpoint, params=params)
 
     def request_usenet_download_link(self, usenet_id):
         """

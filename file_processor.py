@@ -244,7 +244,7 @@ class FileProcessor:
         active_downloads,
     ):
         """
-        Downloads a file from a URL with progress tracking.
+        Downloads a file from a URL with progress tracking and resume capability.
 
         Args:
             download_url (str): The URL of the file to download.
@@ -255,8 +255,12 @@ class FileProcessor:
             active_downloads (dict): active downloads
         """
         logger.info(f"Starting download: {download_name} to {download_path}")
+        max_retries = 10
+        retry_count = 0
+        timeout = (30, 300)  # (connect timeout, read timeout) in seconds
+        
         try:
-            head_response = requests.head(download_url)
+            head_response = requests.head(download_url, timeout=timeout)
             total_size = int(head_response.headers.get("content-length", 0))
 
             content_disposition = head_response.headers.get("Content-Disposition", "")
@@ -272,7 +276,15 @@ class FileProcessor:
             download_path = (
                 download_path.parent / filename
             )  # Ensure filename respects content disposition
+            
+            # Check if partial download exists
+            downloaded_size = 0
+            if download_path.exists():
+                downloaded_size = download_path.stat().st_size
+                logger.info(f"Resuming download from {humanize.naturalsize(downloaded_size)}")
+            
             download_stats = DownloadStats(filename, total_size)
+            download_stats.downloaded = downloaded_size
             active_downloads[download_id] = download_stats
 
             stats_thread = threading.Thread(
@@ -282,24 +294,63 @@ class FileProcessor:
             )
             stats_thread.start()
 
-            with requests.get(download_url, stream=True) as response:
-                response.raise_for_status()
-                download_path.parent.mkdir(
-                    parents=True, exist_ok=True
-                )  # Ensure download dir exists
-                with open(download_path, "wb") as f:
-                    for chunk in response.iter_content(chunk_size=8192):
-                        if chunk:
-                            f.write(chunk)
-                            download_stats.update(len(chunk))
-
-            logger.info(f"Downloaded {filename} successfully to {download_path}")
-            download_stats.download_complete = True
-            if download_path.suffix.lower() == ".zip":
-                download_stats.should_stop = (
-                    True  # Stop download stats before extraction
-                )
-                self.extract_zip(download_path, active_downloads)
+            download_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            while retry_count < max_retries:
+                try:
+                    headers = {}
+                    if downloaded_size > 0:
+                        headers['Range'] = f'bytes={downloaded_size}-'
+                    
+                    with requests.get(download_url, stream=True, headers=headers, timeout=timeout) as response:
+                        # Accept both 200 (full content) and 206 (partial content)
+                        if response.status_code not in [200, 206]:
+                            response.raise_for_status()
+                        
+                        # If server doesn't support resume, start over
+                        if downloaded_size > 0 and response.status_code == 200:
+                            logger.warning("Server doesn't support resume, starting from beginning")
+                            downloaded_size = 0
+                            download_stats.downloaded = 0
+                            mode = "wb"
+                        else:
+                            mode = "ab" if downloaded_size > 0 else "wb"
+                        
+                        with open(download_path, mode) as f:
+                            for chunk in response.iter_content(chunk_size=1024*1024):  # 1MB chunks
+                                if chunk:
+                                    f.write(chunk)
+                                    download_stats.update(len(chunk))
+                                    downloaded_size += len(chunk)
+                    
+                    # Download completed successfully
+                    logger.info(f"Downloaded {filename} successfully to {download_path}")
+                    download_stats.download_complete = True
+                    
+                    if download_path.suffix.lower() == ".zip":
+                        download_stats.should_stop = True
+                        self.extract_zip(download_path, active_downloads)
+                    
+                    break  # Exit retry loop on success
+                    
+                except (requests.exceptions.ConnectionError, 
+                        requests.exceptions.ChunkedEncodingError,
+                        requests.exceptions.Timeout) as e:
+                    retry_count += 1
+                    if retry_count < max_retries:
+                        wait_time = min(30, 5 * retry_count)  # Exponential backoff, max 30s
+                        logger.warning(
+                            f"Connection error for {download_name} (attempt {retry_count}/{max_retries}): {e}. "
+                            f"Retrying in {wait_time}s..."
+                        )
+                        time.sleep(wait_time)
+                        # Update downloaded size from file
+                        if download_path.exists():
+                            downloaded_size = download_path.stat().st_size
+                            download_stats.downloaded = downloaded_size
+                    else:
+                        logger.error(f"Max retries reached for {download_name}. Download failed.")
+                        raise
 
         except requests.exceptions.RequestException as e:
             logger.error(f"Download error for ID {download_id}: {e}")
@@ -312,7 +363,7 @@ class FileProcessor:
         finally:
             if download_id in active_downloads:
                 active_downloads[download_id].should_stop = True
-            if download_id in download_tracking:  # Moved from try block
+            if download_id in download_tracking:
                 del download_tracking[download_id]
 
     def _stats_update_thread(self, download_id, stats, active_downloads):

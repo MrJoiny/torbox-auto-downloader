@@ -10,8 +10,19 @@ This project automatically downloads torrents and NZBs from a watch directory us
 
 ### Configuration
 
-1.  Set the `TORBOX_API_KEY` environment variable in your `docker-compose.yml` file. Replace the placeholder `API_KEY` with your actual Torbox API key.
-2.  Update the volume paths in your `docker-compose.yml` file to match your local filesystem structure. 
+1.  **Create a `.env` file** from the example template:
+
+    ```bash
+    cp .env.example .env
+    ```
+
+2.  **Edit the `.env` file** and set your `TORBOX_API_KEY`:
+
+    ```bash
+    TORBOX_API_KEY=your_actual_api_key_here
+    ```
+
+3.  Update the volume paths in your `docker-compose.yml` file to match your local filesystem structure. 
 
 **For Dual Directory Mode (Sonarr/Radarr):**
 The default configuration uses separate directories for each:
@@ -58,6 +69,8 @@ This will watch `/app/watch` and download to `/app/downloads` only (no subdirect
 
 ## Configuration (Environment Variables)
 
+All configuration is managed via the `.env` file. Copy `.env.example` to `.env` and customize as needed.
+
 | Variable                | Default Value              | Description                                                                                                                                                                                                                            |
 | ----------------------- | -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `TORBOX_API_KEY`        | **(Required)**             | Your TorBox API key.                                                                                                                                                                                                                   |
@@ -89,9 +102,15 @@ This will watch `/app/watch` and download to `/app/downloads` only (no subdirect
     pip install -r requirements.txt
     ```
 
-2.  Set the `TORBOX_API_KEY` environment variable and other environment variables as needed, for example in your shell before running.
+2.  **Create a `.env` file** from the example template:
 
-3.  Run the application:
+    ```bash
+    cp .env.example .env
+    ```
+
+3.  **Edit the `.env` file** and set your `TORBOX_API_KEY` and other environment variables as needed.
+
+4.  Run the application:
 
     ```bash
     python main.py

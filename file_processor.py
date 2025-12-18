@@ -238,15 +238,13 @@ class FileProcessor:
     Handles file system operations like downloading and extracting files.
     """
 
-    def __init__(self, download_dir, progress_interval):
+    def __init__(self, progress_interval):
         """
         Initializes a FileProcessor object.
 
         Args:
-            download_dir (Path): The directory where downloaded files are stored.
             progress_interval (int): The interval in seconds for updating download/extraction progress.
         """
-        self.download_dir = download_dir
         self.progress_interval = progress_interval
         self.active_extract_stats = {}  # Track active extractions
 
@@ -258,6 +256,7 @@ class FileProcessor:
         download_id,
         download_tracking,
         active_downloads,
+        download_dir,
     ):
         """
         Downloads a file from a URL with progress tracking and resume capability.
@@ -269,6 +268,7 @@ class FileProcessor:
             download_id (str): The ID of the download.
             download_tracking (dict): download tracker
             active_downloads (dict): active downloads
+            download_dir (Path): The destination directory for this specific download.
         """
         logger.info(f"Starting download: {download_name} to {download_path}")
         max_retries = 10
@@ -345,7 +345,7 @@ class FileProcessor:
                     
                     if download_path.suffix.lower() == ".zip":
                         download_stats.should_stop = True
-                        self.extract_zip(download_path, active_downloads)
+                        self.extract_zip(download_path, active_downloads, download_dir)
                     
                     break  # Exit retry loop on success
                     
@@ -399,19 +399,51 @@ class FileProcessor:
         if download_id in active_downloads:
             del active_downloads[download_id]
 
-    def extract_zip(self, zip_path, active_downloads):
+    def extract_zip(self, zip_path, active_downloads, download_dir):
         """
         Extracts a ZIP file with progress tracking.
+        If the ZIP contains a single top-level directory, extracts directly to download_dir.
+        Otherwise, creates a directory named after the ZIP file.
 
         Args:
             zip_path (Path): The path to the ZIP file.
             active_downloads: active downloads
+            download_dir (Path): The destination directory for extraction.
         """
         logger.info(f"Extracting ZIP file: {zip_path}")
-        extract_dir = self.download_dir / zip_path.stem
-        extract_dir.mkdir(exist_ok=True)
-
+        
         try:
+            # First, analyze the ZIP structure
+            with zipfile.ZipFile(zip_path, "r") as zip_ref:
+                all_files = zip_ref.namelist()
+                
+                # Get all top-level items (files and directories)
+                top_level_items = set()
+                for name in all_files:
+                    # Get the first part of the path
+                    top_item = name.split('/')[0]
+                    top_level_items.add(top_item)
+                
+                # Check if there's only one top-level directory
+                single_top_dir = None
+                if len(top_level_items) == 1:
+                    top_item = list(top_level_items)[0]
+                    # Check if it's a directory (has a trailing slash or other files inside it)
+                    if any(name.startswith(top_item + '/') for name in all_files):
+                        single_top_dir = top_item
+                        logger.info(f"ZIP contains single top-level directory: {single_top_dir}")
+            
+            # Determine extraction directory
+            if single_top_dir:
+                # Extract directly to download_dir, the single folder will be created
+                extract_dir = download_dir
+                logger.info(f"Extracting directly to {extract_dir} (single folder structure)")
+            else:
+                # Multiple top-level items, create a directory for them
+                extract_dir = download_dir / zip_path.stem
+                extract_dir.mkdir(parents=True, exist_ok=True)
+                logger.info(f"Extracting to {extract_dir} (multiple top-level items)")
+
             total_size = 0
             total_files = 0
             with zipfile.ZipFile(zip_path, "r") as zip_ref:

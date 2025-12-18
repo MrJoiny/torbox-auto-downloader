@@ -39,7 +39,6 @@ class TorBoxWatcherApp:
             config.MAX_RETRIES,
         )
         self.file_processor = FileProcessor(
-            config.DOWNLOAD_DIR,
             config.PROGRESS_INTERVAL,
         )
         self.download_tracker = DownloadTracker()
@@ -48,31 +47,64 @@ class TorBoxWatcherApp:
         )  # Track active downloads here, passed to file_processor
 
         # Ensure directories exist
-        config.WATCH_DIR.mkdir(exist_ok=True)
-        config.DOWNLOAD_DIR.mkdir(exist_ok=True)
+        config.RADARR_WATCH_DIR.mkdir(parents=True, exist_ok=True)
+        config.RADARR_DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        
+        # Only create separate Sonarr directories if in dual directory mode
+        if config.DUAL_DIRECTORY_MODE:
+            config.SONARR_WATCH_DIR.mkdir(parents=True, exist_ok=True)
+            config.SONARR_DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
         logger.info(
             f"Initialized TorBox Watcher with API base: {self.api_client.api_base}"
         )
-        logger.info(f"Watching directory: {config.WATCH_DIR}")
-        logger.info(f"Download directory: {config.DOWNLOAD_DIR}")
+        
+        if config.DUAL_DIRECTORY_MODE:
+            logger.info(f"Running in dual directory mode")
+            logger.info(f"Watching Radarr directory: {config.RADARR_WATCH_DIR} -> {config.RADARR_DOWNLOAD_DIR}")
+            logger.info(f"Watching Sonarr directory: {config.SONARR_WATCH_DIR} -> {config.SONARR_DOWNLOAD_DIR}")
+        else:
+            logger.info(f"Running in single directory mode")
+            logger.info(f"Watching directory: {config.RADARR_WATCH_DIR}")
+            logger.info(f"Download directory: {config.RADARR_DOWNLOAD_DIR}")
+        
         logger.info(f"Progress updates every {config.PROGRESS_INTERVAL} seconds")
 
     def scan_watch_directory(self):
         """
-        Scans the watch directory for torrent, magnet, and NZB files.
+        Scans both watch directories for torrent, magnet, and NZB files.
         Processes each file found according to its type.
+        In single directory mode, scans only one directory.
         """
-        logger.info(f"Scanning watch directory: {self.config.WATCH_DIR}")
+        if self.config.DUAL_DIRECTORY_MODE:
+            # Scan both Radarr and Sonarr directories separately
+            logger.info(f"Scanning Radarr watch directory: {self.config.RADARR_WATCH_DIR}")
+            self._scan_directory(self.config.RADARR_WATCH_DIR, self.config.RADARR_DOWNLOAD_DIR)
+            
+            logger.info(f"Scanning Sonarr watch directory: {self.config.SONARR_WATCH_DIR}")
+            self._scan_directory(self.config.SONARR_WATCH_DIR, self.config.SONARR_DOWNLOAD_DIR)
+        else:
+            # single directory mode: scan single directory
+            logger.info(f"Scanning watch directory: {self.config.RADARR_WATCH_DIR}")
+            self._scan_directory(self.config.RADARR_WATCH_DIR, self.config.RADARR_DOWNLOAD_DIR)
+
+    def _scan_directory(self, watch_dir, download_dir):
+        """
+        Scans a specific watch directory for torrent, magnet, and NZB files.
+        
+        Args:
+            watch_dir (Path): The directory to watch
+            download_dir (Path): The destination directory for downloads
+        """
         results = []
-        for file_path in self.config.WATCH_DIR.glob("*"):
+        for file_path in watch_dir.glob("*"):
             if file_path.is_file():
                 file_extension = file_path.suffix.lower()
                 if file_extension in [".torrent", ".magnet"]:
-                    result = self.process_torrent_file(file_path)
+                    result = self.process_torrent_file(file_path, download_dir)
                     results.append(result)
                 elif file_extension == ".nzb":
-                    result = self.process_nzb_file(file_path)
+                    result = self.process_nzb_file(file_path, download_dir)
                     results.append(result)
 
         for success, file_path, download_id in results:
@@ -114,7 +146,7 @@ class TorBoxWatcherApp:
         identifier = download_id if download_id else download_hash
         return identifier, download_id, download_hash
 
-    def process_torrent_file(self, file_path: Path):
+    def process_torrent_file(self, file_path: Path, download_dir: Path):
         """
         Processes a torrent file or magnet link.
 
@@ -122,6 +154,7 @@ class TorBoxWatcherApp:
 
         Args:
             file_path (Path): The path to the torrent file or magnet link.
+            download_dir (Path): The destination directory for this download.
         """
         file_name = file_path.name
         logger.info(f"Processing torrent file: {file_name}")
@@ -156,7 +189,8 @@ class TorBoxWatcherApp:
                     file_stem=file_path.stem,
                     original_file=file_path,
                     download_id=download_id,
-                    download_hash=download_hash
+                    download_hash=download_hash,
+                    download_dir=download_dir
                 )
                 return success, file_path, identifier
             else:
@@ -200,6 +234,9 @@ class TorBoxWatcherApp:
             
             logger.debug(f"{download_type.capitalize()} status response: {json.dumps(status_data)}")
 
+            # Reset failure count on successful API call
+            self.download_tracker.reset_failure_count(identifier)
+
             # Extract download data from response
             download_data = None
             if "data" in status_data:
@@ -241,6 +278,16 @@ class TorBoxWatcherApp:
 
         except Exception as e:
             logger.error(f"Error checking {download_type} status for identifier {identifier}: {e}")
+            
+            # Increment failure count
+            failure_count = self.download_tracker.increment_failure_count(identifier)
+            
+            if failure_count and failure_count >= self.config.MAX_STATUS_CHECK_FAILURES:
+                logger.error(
+                    f"Max status check failures ({self.config.MAX_STATUS_CHECK_FAILURES}) reached for "
+                    f"{download_type} identifier {identifier}. Removing from tracking."
+                )
+                self.download_tracker.remove_tracked_download(identifier)
         
         return False
 
@@ -270,20 +317,32 @@ class TorBoxWatcherApp:
 
         # Prefer the specific API 'id' if stored, otherwise use the identifier
         request_id = tracking_info.get("id") or identifier
+        
+        # Get the download directory from tracking info
+        download_dir = Path(tracking_info.get("download_dir")) if tracking_info.get("download_dir") else None
+        if not download_dir:
+            logger.error(f"No download directory found for {download_type} identifier {identifier}")
+            return
 
         try:
-            # Call appropriate API method
+            # Call appropriate API method with zip_link parameter
             if download_type == "torrent":
-                download_link_data = self.api_client.request_torrent_download_link(request_id)
+                download_link_data = self.api_client.request_torrent_download_link(
+                    request_id, 
+                    zip_link=self.config.ALLOW_ZIP
+                )
             else:  # usenet
-                download_link_data = self.api_client.request_usenet_download_link(request_id)
+                download_link_data = self.api_client.request_usenet_download_link(
+                    request_id,
+                    zip_link=self.config.ALLOW_ZIP
+                )
 
             if download_link_data.get("success", False) and "data" in download_link_data:
                 download_url = download_link_data["data"]
                 logger.info(
                     f"Got download URL for {download_type} identifier {identifier} (request_id: {request_id}): {download_url}"
                 )
-                download_path = self.config.DOWNLOAD_DIR / tracking_info["name"]
+                download_path = download_dir / tracking_info["name"]
                 self.file_processor.download_file(
                     download_url,
                     download_path,
@@ -291,6 +350,7 @@ class TorBoxWatcherApp:
                     identifier,
                     self.download_tracker.get_tracked_downloads(),
                     self.active_downloads,
+                    download_dir,
                 )
             else:
                 logger.error(
@@ -310,7 +370,7 @@ class TorBoxWatcherApp:
         """
         self._request_download_common(identifier, "torrent")
 
-    def process_nzb_file(self, file_path: Path):
+    def process_nzb_file(self, file_path: Path, download_dir: Path):
         """
         Processes an NZB file.
 
@@ -318,6 +378,7 @@ class TorBoxWatcherApp:
 
         Args:
             file_path (Path): The path to the NZB file.
+            download_dir (Path): The destination directory for this download.
         """
         file_name = file_path.name
         logger.info(f"Processing NZB file: {file_name}")
@@ -344,7 +405,8 @@ class TorBoxWatcherApp:
                     file_stem=file_path.stem,
                     original_file=file_path,
                     download_id=download_id,
-                    download_hash=download_hash
+                    download_hash=download_hash,
+                    download_dir=download_dir
                 )
                 return success, file_path, identifier
             else:
@@ -407,7 +469,7 @@ class TorBoxWatcherApp:
             except Exception as e:
                 logger.error(f"Error checking status for identifier {identifier}: {e}")
 
-    def add_item_to_track(self, item_id, item_type, item_name, item_hash=None):
+    def add_item_to_track(self, item_id, item_type, item_name, item_hash=None, download_dir=None):
         """
         Adds an item from the web UI to the download tracker.
 
@@ -416,6 +478,7 @@ class TorBoxWatcherApp:
             item_type (str): 'torrent' or 'usenet'.
             item_name (str): The name of the download item.
             item_hash (str, optional): The hash of the item, if available.
+            download_dir (Path, optional): The destination directory. Defaults to RADARR_DOWNLOAD_DIR if not specified.
 
         Returns:
             bool: True if tracking was initiated, False otherwise (e.g., already tracked).
@@ -426,8 +489,12 @@ class TorBoxWatcherApp:
         if not identifier:
             logger.error(f"Cannot track item '{item_name}': Missing both ID and Hash.")
             return False
+        
+        # Default to Radarr download directory if not specified
+        if not download_dir:
+            download_dir = self.config.RADARR_DOWNLOAD_DIR
 
-        logger.info(f"Attempting to track item via Web UI: Identifier={identifier}, Type={item_type}, Name={item_name}")
+        logger.info(f"Attempting to track item via Web UI: Identifier={identifier}, Type={item_type}, Name={item_name}, Dest={download_dir}")
 
         # Call the updated track_download method
         # Pass None for original_file as it's not applicable here
@@ -438,7 +505,8 @@ class TorBoxWatcherApp:
             file_stem=item_name,
             original_file=None,
             download_id=item_id,
-            download_hash=item_hash
+            download_hash=item_hash,
+            download_dir=download_dir
         )
         return success
 

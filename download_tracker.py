@@ -23,6 +23,7 @@ class DownloadTracker:
         original_file=None, # Made optional
         download_id=None,
         download_hash=None,
+        download_dir=None,
     ):
         """
         Tracks a new download. Uses the provided identifier as the primary key.
@@ -35,6 +36,7 @@ class DownloadTracker:
             original_file (str, optional): The path to the original file, if applicable. Defaults to None.
             download_id (str, optional): The download ID from the API (e.g., torrent_id). Defaults to None.
             download_hash (str, optional): The download hash from the API. Defaults to None.
+            download_dir (Path, optional): The destination directory for this download. Defaults to None.
 
         Returns:
             bool: True if tracking was successfully initiated, False if already tracked.
@@ -50,11 +52,38 @@ class DownloadTracker:
             "original_file": str(original_file) if original_file else None,
             "id": download_id, # Store the specific API ID if provided
             "hash": download_hash, # Store the hash if provided
+            "download_dir": str(download_dir) if download_dir else None,
+            "failure_count": 0,  # Track consecutive failures
         }
         logger.info(
-            f"Tracking new {download_type} download: Identifier: {identifier}, Name: {file_stem}"
+            f"Tracking new {download_type} download: Identifier: {identifier}, Name: {file_stem}, Dest: {download_dir}"
         )
         return True
+
+    def increment_failure_count(self, identifier):
+        """
+        Increments the failure count for a download.
+
+        Args:
+            identifier (str): The identifier of the download.
+
+        Returns:
+            int: The new failure count, or None if download not found.
+        """
+        if str(identifier) in self.download_tracking:
+            self.download_tracking[str(identifier)]["failure_count"] += 1
+            return self.download_tracking[str(identifier)]["failure_count"]
+        return None
+
+    def reset_failure_count(self, identifier):
+        """
+        Resets the failure count for a download (on successful check).
+
+        Args:
+            identifier (str): The identifier of the download.
+        """
+        if str(identifier) in self.download_tracking:
+            self.download_tracking[str(identifier)]["failure_count"] = 0
 
     def get_tracked_downloads(self):
         """

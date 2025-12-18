@@ -163,18 +163,19 @@ class TorBoxAPIClient:
         params = self._parse_query_string(query_param)
         return self._get(endpoint, params=params)
 
-    def request_torrent_download_link(self, torrent_id):
+    def request_torrent_download_link(self, torrent_id, zip_link=False):
         """
         Requests a download link for a specific torrent from the TorBox API.
 
         Args:
             torrent_id (str): The ID of the torrent.
+            zip_link (bool): Whether to request a ZIP download link. Defaults to False.
 
         Returns:
             dict: The API response.
         """
         endpoint = "/torrents/requestdl"
-        params = {"torrent_id": torrent_id, "zip_link": "true", "token": self.api_key}
+        params = {"torrent_id": torrent_id, "zip_link": "true" if zip_link else "false", "token": self.api_key}
         return self._get(endpoint, params=params)
 
     def create_usenet_download(self, file_name, file_path, payload):
@@ -208,16 +209,17 @@ class TorBoxAPIClient:
         params = self._parse_query_string(query_param)
         return self._get(endpoint, params=params)
 
-    def request_usenet_download_link(self, usenet_id):
+    def request_usenet_download_link(self, usenet_id, zip_link=False):
         """
         Requests a download link for a specific usenet download from the TorBox API.
 
         Args:
             usenet_id (str): The ID of the usenet download.
+            zip_link (bool): Whether to request a ZIP download link. Defaults to False.
 
         Returns:
             dict: The API response.
         """
         endpoint = "/usenet/requestdl"
-        params = {"usenet_id": usenet_id, "zip_link": "true", "token": self.api_key}
+        params = {"usenet_id": usenet_id, "zip_link": "true" if zip_link else "false", "token": self.api_key}
         return self._get(endpoint, params=params)

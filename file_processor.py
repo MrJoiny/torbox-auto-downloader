@@ -312,13 +312,6 @@ class FileProcessor:
                     filename = filename_from_header
                     logger.info(f"Using filename from Content-Disposition with extension: {filename}")
             else:
-                        # Try common video extensions as fallback
-                        logger.warning(f"Could not determine extension from URL either. Using Content-Disposition as-is.")
-                        filename = filename_from_header
-                else:
-                    filename = filename_from_header
-                    logger.info(f"Using filename from Content-Disposition with extension: {filename}")
-            else:
                 # No Content-Disposition, try to get extension from URL or content type
                 content_type = head_response.headers.get("Content-Type", "")
                 

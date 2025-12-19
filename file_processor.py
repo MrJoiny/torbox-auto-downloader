@@ -280,10 +280,35 @@ class FileProcessor:
             head_response = self.session.head(download_url, timeout=timeout)
             total_size = int(head_response.headers.get("content-length", 0))
 
+            # Log headers for debugging
+            logger.debug(f"Response headers for {download_name}:")
+            logger.debug(f"  Content-Disposition: {head_response.headers.get('Content-Disposition', 'NOT SET')}")
+            logger.debug(f"  Content-Type: {head_response.headers.get('Content-Type', 'NOT SET')}")
+            logger.debug(f"  Download URL path: {download_url.split('?')[0]}")
+
             content_disposition = head_response.headers.get("Content-Disposition", "")
             filename_match = re.search(r'filename="?([^"]+)"?', content_disposition)
             if filename_match:
-                filename = filename_match.group(1)
+                filename_from_header = filename_match.group(1)
+                logger.info(f"Found filename in Content-Disposition: {filename_from_header}")
+                
+                # Check if the filename from header has an extension
+                if not Path(filename_from_header).suffix:
+                    logger.warning(f"Content-Disposition filename has no extension: {filename_from_header}")
+                    # Try to get extension from URL
+                    url_path = download_url.split('?')[0]
+                    url_extension = Path(url_path).suffix
+                    
+                    if url_extension and len(url_extension) <= 5:
+                        filename = f"{filename_from_header}{url_extension}"
+                        logger.info(f"Appended URL extension to Content-Disposition filename: {filename}")
+                    else:
+                        # Try common video extensions as fallback
+                        logger.warning(f"Could not determine extension from URL either. Using Content-Disposition as-is.")
+                        filename = filename_from_header
+                else:
+                    filename = filename_from_header
+                    logger.info(f"Using filename from Content-Disposition with extension: {filename}")
             else:
                 # No Content-Disposition, try to get extension from URL or content type
                 content_type = head_response.headers.get("Content-Type", "")
@@ -292,23 +317,30 @@ class FileProcessor:
                 url_path = download_url.split('?')[0]  # Remove query parameters
                 url_extension = Path(url_path).suffix
                 
+                logger.debug(f"Extracted URL extension: '{url_extension}' (length: {len(url_extension)})")
+                
                 if url_extension and len(url_extension) <= 5:  # Reasonable extension length
                     # Use the extension from URL
                     if download_name.endswith(url_extension):
                         filename = download_name  # Already has correct extension
+                        logger.info(f"Download name already has extension: {filename}")
                     else:
                         filename = f"{download_name}{url_extension}"
+                        logger.info(f"Appended URL extension: {filename}")
                 elif "zip" in content_type:
                     filename = f"{download_name}.zip"
+                    logger.info(f"Detected ZIP content type: {filename}")
                 else:
                     # Fallback: use download_name as-is (might already have extension)
                     # Log a warning if it doesn't have an extension
                     if not Path(download_name).suffix:
                         logger.warning(
                             f"Could not determine file extension for {download_name}. "
-                            f"File may be saved without an extension. Content-Type: {content_type}"
+                            f"File may be saved without an extension. Content-Type: {content_type}, "
+                            f"URL: {download_url[:100]}..."
                         )
                     filename = download_name
+                    logger.info(f"Using download name as-is: {filename}")
             download_path = (
                 download_path.parent / filename
             )  # Ensure filename respects content disposition

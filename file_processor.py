@@ -281,10 +281,10 @@ class FileProcessor:
             total_size = int(head_response.headers.get("content-length", 0))
 
             # Log headers for debugging
-            logger.debug(f"Response headers for {download_name}:")
-            logger.debug(f"  Content-Disposition: {head_response.headers.get('Content-Disposition', 'NOT SET')}")
-            logger.debug(f"  Content-Type: {head_response.headers.get('Content-Type', 'NOT SET')}")
-            logger.debug(f"  Download URL path: {download_url.split('?')[0]}")
+            logger.info(f"Processing download for: {download_name}")
+            logger.info(f"  Content-Disposition: {head_response.headers.get('Content-Disposition', 'NOT SET')}")
+            logger.info(f"  Content-Type: {head_response.headers.get('Content-Type', 'NOT SET')}")
+            logger.info(f"  Download URL path: {download_url.split('?')[0]}")
 
             content_disposition = head_response.headers.get("Content-Disposition", "")
             filename_match = re.search(r'filename="?([^"]+)"?', content_disposition)
@@ -294,15 +294,24 @@ class FileProcessor:
                 
                 # Check if the filename from header has an extension
                 if not Path(filename_from_header).suffix:
-                    logger.warning(f"Content-Disposition filename has no extension: {filename_from_header}")
+                    logger.info(f"Content-Disposition filename has no extension: {filename_from_header}")
                     # Try to get extension from URL
                     url_path = download_url.split('?')[0]
                     url_extension = Path(url_path).suffix
+                    
+                    logger.info(f"Extracted URL extension: '{url_extension}' from URL path: {url_path}")
                     
                     if url_extension and len(url_extension) <= 5:
                         filename = f"{filename_from_header}{url_extension}"
                         logger.info(f"Appended URL extension to Content-Disposition filename: {filename}")
                     else:
+                        # Try common video extensions as fallback
+                        logger.warning(f"Could not determine extension from URL either. Using Content-Disposition as-is: {filename_from_header}")
+                        filename = filename_from_header
+                else:
+                    filename = filename_from_header
+                    logger.info(f"Using filename from Content-Disposition with extension: {filename}")
+            else:
                         # Try common video extensions as fallback
                         logger.warning(f"Could not determine extension from URL either. Using Content-Disposition as-is.")
                         filename = filename_from_header
@@ -317,7 +326,7 @@ class FileProcessor:
                 url_path = download_url.split('?')[0]  # Remove query parameters
                 url_extension = Path(url_path).suffix
                 
-                logger.debug(f"Extracted URL extension: '{url_extension}' (length: {len(url_extension)})")
+                logger.info(f"No Content-Disposition header. Extracted URL extension: '{url_extension}' (length: {len(url_extension)})")
                 
                 if url_extension and len(url_extension) <= 5:  # Reasonable extension length
                     # Use the extension from URL

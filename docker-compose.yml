@@ -2,7 +2,6 @@ services:
   torbox:
     build: .
     image: torbox_auto_downloader:local
-    user: "99:100"
     volumes:
       - ${HOST_WATCH_PATH}:${CONTAINER_WATCH_DIR}
       - ${HOST_DOWNLOAD_PATH}:${CONTAINER_DOWNLOAD_DIR}

@@ -2,4 +2,3 @@ requests
 python-dotenv
 tenacity
 humanize
-Flask

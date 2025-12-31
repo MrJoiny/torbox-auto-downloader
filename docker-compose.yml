@@ -1,29 +1,17 @@
-version: "3.9"
 services:
   torbox:
+    build: .
     image: torbox_auto_downloader:local
-    # You must change the volume paths below to point to your desired directories.
     volumes:
-      - /path/to/watch:/app/watch
-      - /path/to/downloads:/app/downloads
+      - ${HOST_WATCH_PATH}:${CONTAINER_WATCH_DIR}
+      - ${HOST_DOWNLOAD_PATH}:${CONTAINER_DOWNLOAD_DIR}
+    env_file:
+      - .env
     environment:
-      # Replace 'YOUR_TORBOX_API_KEY' with your actual Torbox API key.
-      - TORBOX_API_KEY=YOUR_TORBOX_API_KEY
-      - TORBOX_API_BASE=https://api.torbox.app
-      - TORBOX_API_VERSION=v1
-      - WATCH_DIR=/app/watch
-      - DOWNLOAD_DIR=/app/downloads
-      - WATCH_INTERVAL=60
-      - CHECK_INTERVAL=300
-      - MAX_RETRIES=2
-      - ALLOW_ZIP=true
-      - SEED_PREFERENCE=1
-      - POST_PROCESSING=-1
-      - QUEUE_IMMEDIATELY=false
-      - PROGRESS_INTERVAL=15
-      # Default internal port for the web server. Can be overridden.
-      - WEB_PORT=5151
-    ports:
-      # Map host port (HOST_WEB_PORT env var, default 5151) to container port (WEB_PORT env var)
-      - "${HOST_WEB_PORT:-5151}:${WEB_PORT}"
+      # Override API base/version if needed (defaults in .env)
+      - TORBOX_API_BASE=${TORBOX_API_BASE}
+      - TORBOX_API_VERSION=${TORBOX_API_VERSION}
+      # Pass container paths to the application
+      - WATCH_DIR=${CONTAINER_WATCH_DIR}
+      - DOWNLOAD_DIR=${CONTAINER_DOWNLOAD_DIR}
     restart: unless-stopped

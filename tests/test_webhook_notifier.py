@@ -2,26 +2,13 @@ from types import SimpleNamespace
 
 import requests
 
-from webhook_notifier import WebhookNotifier
-
-
-class FakeResponse:
-    def __init__(self, should_raise=False):
-        self.should_raise = should_raise
-
-    def raise_for_status(self):
-        if self.should_raise:
-            raise requests.HTTPError("webhook failed")
-
-
-class RecordingSession:
-    def __init__(self, failing_urls=None):
-        self.calls = []
-        self.failing_urls = set(failing_urls or [])
-
-    def post(self, url, json, timeout):
-        self.calls.append({"url": url, "json": json, "timeout": timeout})
-        return FakeResponse(should_raise=url in self.failing_urls)
+from webhook_notifier import (
+    DiscordWebhookTarget,
+    GenericWebhookTarget,
+    WebhookNotifier,
+    _build_discord_summary,
+    _parse_urls,
+)
 
 
 def sample_event():
@@ -48,8 +35,51 @@ def sample_event():
     }
 
 
-def test_generic_target_receives_full_json_payload():
-    session = RecordingSession()
+def test_parse_urls_handles_strings_sequences_and_empty_values():
+    assert _parse_urls(" https://one.test , , https://two.test ") == [
+        "https://one.test",
+        "https://two.test",
+    ]
+    assert _parse_urls([" https://one.test ", "", "https://two.test "]) == [
+        "https://one.test",
+        "https://two.test",
+    ]
+    assert _parse_urls(()) == []
+    assert _parse_urls(None) == []
+
+
+def test_build_discord_summary_includes_expected_fields_and_truncates():
+    event = sample_event()
+    event["details"] = "x" * 5_000
+
+    summary = _build_discord_summary(event)
+
+    assert "[download_dropped]" in summary
+    assert "torrent" in summary
+    assert "Example Release" in summary
+    assert "status_not_found" in summary
+    assert "torrent:id:1" in summary
+    assert len(summary) == 2_000
+
+
+def test_generic_target_payload_for_returns_full_event_payload():
+    event = sample_event()
+    target = GenericWebhookTarget("https://generic.example/webhook", 5)
+
+    assert target.payload_for(event) is event
+
+
+def test_discord_target_payload_for_returns_content_payload():
+    target = DiscordWebhookTarget("https://discord.example/webhook", 5)
+
+    payload = target.payload_for(sample_event())
+
+    assert list(payload) == ["content"]
+    assert "download_dropped" in payload["content"]
+
+
+def test_generic_target_receives_full_json_payload(fake_session_factory, fake_response_factory):
+    session = fake_session_factory(post_responses=[fake_response_factory()])
     notifier = WebhookNotifier(
         SimpleNamespace(
             GENERIC_WEBHOOK_URLS=["https://generic.example/webhook"],
@@ -58,21 +88,23 @@ def test_generic_target_receives_full_json_payload():
         ),
         session=session,
     )
-
     event = sample_event()
+
     notifier.notify_download_dropped(event)
 
-    assert session.calls == [
+    assert session.post_calls == [
         {
             "url": "https://generic.example/webhook",
+            "data": None,
+            "files": None,
             "json": event,
             "timeout": 5,
         }
     ]
 
 
-def test_discord_target_receives_content_payload():
-    session = RecordingSession()
+def test_discord_target_receives_content_payload(fake_session_factory, fake_response_factory):
+    session = fake_session_factory(post_responses=[fake_response_factory()])
     notifier = WebhookNotifier(
         SimpleNamespace(
             GENERIC_WEBHOOK_URLS=[],
@@ -84,15 +116,22 @@ def test_discord_target_receives_content_payload():
 
     notifier.notify_download_dropped(sample_event())
 
-    assert session.calls[0]["url"] == "https://discord.example/webhook"
-    assert session.calls[0]["timeout"] == 5
-    assert list(session.calls[0]["json"]) == ["content"]
-    assert "download_dropped" in session.calls[0]["json"]["content"]
-    assert "status_not_found" in session.calls[0]["json"]["content"]
+    assert session.post_calls[0]["url"] == "https://discord.example/webhook"
+    assert session.post_calls[0]["timeout"] == 5
+    assert list(session.post_calls[0]["json"]) == ["content"]
+    assert "download_dropped" in session.post_calls[0]["json"]["content"]
+    assert "status_not_found" in session.post_calls[0]["json"]["content"]
 
 
-def test_failing_webhook_target_does_not_block_remaining_targets():
-    session = RecordingSession(failing_urls={"https://generic.example/bad"})
+def test_failing_webhook_target_does_not_block_remaining_targets(fake_session_factory, fake_response_factory):
+    error = requests.HTTPError("webhook failed")
+    session = fake_session_factory(
+        post_responses=[
+            fake_response_factory(raise_error=error),
+            fake_response_factory(),
+            fake_response_factory(),
+        ]
+    )
     notifier = WebhookNotifier(
         SimpleNamespace(
             GENERIC_WEBHOOK_URLS=[
@@ -107,7 +146,7 @@ def test_failing_webhook_target_does_not_block_remaining_targets():
 
     notifier.notify_download_dropped(sample_event())
 
-    assert [call["url"] for call in session.calls] == [
+    assert [call["url"] for call in session.post_calls] == [
         "https://generic.example/bad",
         "https://generic.example/good",
         "https://discord.example/webhook",

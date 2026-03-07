@@ -287,7 +287,7 @@ class TorBoxWatcherApp:
             watch_dir (Path): The directory to watch
             download_dir (Path): The destination directory for downloads
         """
-        for file_path in watch_dir.glob("*"):
+        for file_path in sorted(watch_dir.glob("*"), key=lambda path: path.name.lower()):
             if file_path.is_file():
                 file_extension = file_path.suffix.lower()
                 success = False

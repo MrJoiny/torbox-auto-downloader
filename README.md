@@ -1,179 +1,145 @@
 # TorBox Auto Downloader
 
-This project automatically downloads torrents and NZBs from a watch directory using the TorBox API.
+Watch-folder downloader for TorBox torrents and NZBs.
 
-## Getting Started with Docker
+## Docker
 
-### Prerequisites
+The default container flow uses the published image:
 
-*   Docker and Docker Compose installed.
-
-### Configuration
-
-1.  **Create a `.env` file** from the example template:
-
-    ```bash
-    cp .env.example .env
-    ```
-
-2.  **Edit the `.env` file** and configure:
-    - Set your `TORBOX_API_KEY`
-    - Update `HOST_WATCH_PATH` and `HOST_DOWNLOAD_PATH` to match your filesystem
-    - Optionally customize `CONTAINER_WATCH_DIR` and `CONTAINER_DOWNLOAD_DIR` (defaults: `/app/watch` and `/app/downloads`)
-
-    Example:
-    ```bash
-    TORBOX_API_KEY=your_actual_api_key_here
-    HOST_WATCH_PATH=/mnt/user/downloads/temp
-    HOST_DOWNLOAD_PATH=/mnt/user/downloads
-    CONTAINER_WATCH_DIR=/app/watch
-    CONTAINER_DOWNLOAD_DIR=/app/downloads
-    ```
-
-    The host paths will be mounted to the container paths specified.
-
-**For Dual Directory Mode (Sonarr/Radarr):**
-The default `.env.example` uses subdirectory names that get appended to the base container paths.
-With the default configuration:
-- Radarr will use `${CONTAINER_WATCH_DIR}/radarr` and `${CONTAINER_DOWNLOAD_DIR}/radarr`
-- Sonarr will use `${CONTAINER_WATCH_DIR}/sonarr` and `${CONTAINER_DOWNLOAD_DIR}/sonarr`
-
-Which with defaults becomes:
-- Radarr: `/app/watch/radarr` and `/app/downloads/radarr`
-- Sonarr: `/app/watch/sonarr` and `/app/downloads/sonarr`
-
-You can customize the subdirectory names in your `.env` file:
 ```bash
-RADARR_WATCH_SUBDIR=radarr
-RADARR_DOWNLOAD_SUBDIR=radarr
-SONARR_WATCH_SUBDIR=sonarr
-SONARR_DOWNLOAD_SUBDIR=sonarr
+git clone https://github.com/MrJoiny/torbox-auto-downloader
+cd torbox-auto-downloader
+cp .env.example .env
 ```
 
-**For Legacy Single Directory Mode:**
-If you don't want to separate Sonarr/Radarr downloads, comment out all the `*_SUBDIR` variables in your `.env` file:
+Edit `.env` and set:
+
+- `TORBOX_API_KEY`
+- `HOST_WATCH_PATH`
+- `HOST_DOWNLOAD_PATH`
+
+Then start the container:
+
 ```bash
-# RADARR_WATCH_SUBDIR=radarr
-# RADARR_DOWNLOAD_SUBDIR=radarr
-# SONARR_WATCH_SUBDIR=sonarr
-# SONARR_DOWNLOAD_SUBDIR=sonarr
+docker compose up -d
 ```
-This will watch `${CONTAINER_WATCH_DIR}` and download to `${CONTAINER_DOWNLOAD_DIR}` only (no subdirectories created).
 
-### Running
-1.  Clone Repo
+The default Compose file pulls `mrjoiny/torbox-auto-downloader:${IMAGE_TAG:-latest}`.
 
-    ```bash
-    git clone https://github.com/ArnoldWildt/torbox-auto-downloader
-    ```
-    
-1.  Build the Docker image:
+### Paths and ownership
 
-    ```bash
-    docker build -t torbox_auto_downloader:local .
-    ```
+Compose wiring variables are:
 
-2.  Start the container using Docker Compose:
+- `HOST_WATCH_PATH`
+- `HOST_DOWNLOAD_PATH`
+- `CONTAINER_WATCH_DIR`
+- `CONTAINER_DOWNLOAD_DIR`
+- `IMAGE_TAG`
 
-    ```bash
-    docker compose up
-    ```
+The application itself reads:
 
-    To run in detached mode (in the background):
+- `WATCH_DIR`
+- `DOWNLOAD_DIR`
+- `TORBOX_API_KEY`
+- the remaining TorBox/runtime settings listed below
 
-    ```bash
-    docker compose up -d
-    ```
+`docker-compose.yml` maps `WATCH_DIR=${CONTAINER_WATCH_DIR}` and `DOWNLOAD_DIR=${CONTAINER_DOWNLOAD_DIR}` for you. The image keeps the default container user unchanged for compatibility with host-mounted volumes.
 
-## Configuration (Environment Variables)
+If you want stricter file ownership on your host, add a Compose `user:` override yourself:
 
-All configuration is managed via the `.env` file. Copy `.env.example` to `.env` and customize as needed.
+```yaml
+services:
+  torbox:
+    user: "1000:1000"
+```
 
-| Variable                    | Default Value              | Description                                                                                                                                                                                                                            |
-| --------------------------- | -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `TORBOX_API_KEY`            | **(Required)**             | Your TorBox API key.                                                                                                                                                                                                                   |
-| `TORBOX_API_BASE`           | `https://api.torbox.app`   | The base URL of the TorBox API.                                                                                                                                                                                                        |
-| `TORBOX_API_VERSION`        | `v1`                       | The version of the TorBox API.                                                                                                                                                                                                         |
-| `HOST_WATCH_PATH`           | **(Required)**             | Host path to mount as the watch directory (e.g., `/mnt/user/downloads/temp`).                                                                                                                                                        |
-| `HOST_DOWNLOAD_PATH`        | **(Required)**             | Host path to mount as the download directory (e.g., `/mnt/user/downloads`).                                                                                                                                                          |
-| `CONTAINER_WATCH_DIR`       | `/app/watch`               | Container path where `HOST_WATCH_PATH` is mounted. Base directory for watching files.                                                                                                                                                |
-| `CONTAINER_DOWNLOAD_DIR`    | `/app/downloads`           | Container path where `HOST_DOWNLOAD_PATH` is mounted. Base directory for downloads.                                                                                                                                                  |
-| `WATCH_DIR`                 | `/app/watch`               | (Deprecated) Use `CONTAINER_WATCH_DIR` instead. Kept for backward compatibility.                                                                                                                                                     |
-| `DOWNLOAD_DIR`              | `/app/downloads`           | (Deprecated) Use `CONTAINER_DOWNLOAD_DIR` instead. Kept for backward compatibility.                                                                                                                                                  |
-| `RADARR_WATCH_SUBDIR`       | `radarr`*                  | Subdirectory appended to `CONTAINER_WATCH_DIR` for Radarr. *Enables dual directory mode.                                                                                                                                             |
-| `RADARR_DOWNLOAD_SUBDIR`    | `radarr`*                  | Subdirectory appended to `CONTAINER_DOWNLOAD_DIR` for Radarr. *Enables dual directory mode.                                                                                                                                          |
-| `SONARR_WATCH_SUBDIR`       | `sonarr`*                  | Subdirectory appended to `CONTAINER_WATCH_DIR` for Sonarr. *Enables dual directory mode.                                                                                                                                             |
-| `SONARR_DOWNLOAD_SUBDIR`    | `sonarr`*                  | Subdirectory appended to `CONTAINER_DOWNLOAD_DIR` for Sonarr. *Enables dual directory mode.                                                                                                                                          |
-| `WATCH_INTERVAL`            | `60`                       | The interval (in seconds) between scans of the watch directories.                                                                                                                                                                     |
-| `CHECK_INTERVAL`            | `300`                      | The minimum interval (in seconds) between download status polling passes. Watch-folder scans still run every `WATCH_INTERVAL`.                                                                                                       |
-| `MAX_TRACKING_IDLE_HOURS`   | `24`                       | Drops a tracked item only after it has been idle for longer than this many hours. Idle time is based on `last_activity_at`, not initial submission time.                                                                             |
-| `MAX_RETRIES`               | `2`                        | The maximum number of retries for API calls.                                                                                                                                                                                           |
-| `MAX_STATUS_CHECK_FAILURES` | `5`                        | Maximum consecutive status API exceptions before a tracked item is dropped with a `status_check_exception` event.                                                                                                                      |
-| `MAX_NOT_FOUND_FAILURES`    | `3`                        | Maximum consecutive successful status lookups where the tracked item is missing from TorBox before it is dropped with a `status_not_found` event.                                                                                     |
-| `MAX_DOWNLOAD_LINK_FAILURES`| `3`                        | Maximum consecutive failed `requestdl` responses or exceptions before a tracked item is dropped with a `download_link_request_failed` event.                                                                                           |
-| `GENERIC_WEBHOOK_URLS`      | empty                      | Comma-separated list of generic webhook endpoints. Each receives the full `download_dropped` event JSON body.                                                                                                                         |
-| `DISCORD_WEBHOOK_URLS`      | empty                      | Comma-separated list of Discord webhook URLs. Each receives a human-readable `content` summary for `download_dropped` events.                                                                                                         |
-| `WEBHOOK_TIMEOUT_SECONDS`   | `5`                        | Per-webhook delivery timeout. Webhook delivery is synchronous and best-effort; failures are logged and do not stop the downloader.                                                                                                    |
-| `ALLOW_ZIP`                 | `false`                    | Whether to allow automatic ZIP compression of downloads from TorBox.                                                                                                                                                                  |
-| `SEED_PREFERENCE`           | `1`                        | Seed preference for torrents (specific to TorBox API).                                                                                                                                                                                 |
-| `POST_PROCESSING`           | `-1`                       | Post-processing setting for usenet downloads (specific to TorBox API).                                                                                                                                                                 |
-| `QUEUE_IMMEDIATELY`         | `false`                    | Whether to queue downloads immediately or add them as paused (specific to TorBox API, behavior may depend on your Torbox subscription. If set to `false` downloads are added as paused, if `true` downloads are added to the queue and tracked through TorBox's queued-download API until an active download ID is assigned). |
-| `PROGRESS_INTERVAL`         | `15`                       | The interval (in seconds) for updating download/extraction progress.                                                                                                                                                                   |
+## Configuration
 
-**Note:** Setting any of the `*_SUBDIR` variables enables dual directory mode. When enabled, subdirectories are automatically appended to `CONTAINER_WATCH_DIR` and `CONTAINER_DOWNLOAD_DIR`.
+For local source runs, `.env` is loaded automatically when you start the app from the repo root. Real environment variables still win over values in `.env`.
 
-Tracked items emit an internal `download_dropped` event whenever they are removed for a terminal failure. Generic webhooks receive the full JSON event body, while Discord webhooks receive a compact text summary. Slow queued or processing items are not dropped just for taking time; automatic drops are limited to repeated hard-failure signals and idle stale timeouts.
+### Variables
 
-## Local Development (without Docker)
+| Variable | Scope | Default | Description |
+| --- | --- | --- | --- |
+| `TORBOX_API_KEY` | Runtime | Required | TorBox API key. |
+| `TORBOX_API_BASE` | Runtime | `https://api.torbox.app` | TorBox API base URL. |
+| `TORBOX_API_VERSION` | Runtime | `v1` | TorBox API version. |
+| `WATCH_DIR` | Runtime | `/app/watch` | Base watch directory consumed by the app. For Compose, this is set from `CONTAINER_WATCH_DIR`. |
+| `DOWNLOAD_DIR` | Runtime | `/app/downloads` | Base download directory consumed by the app. For Compose, this is set from `CONTAINER_DOWNLOAD_DIR`. |
+| `HOST_WATCH_PATH` | Compose | Required | Host path mounted into the container watch directory. |
+| `HOST_DOWNLOAD_PATH` | Compose | Required | Host path mounted into the container download directory. |
+| `CONTAINER_WATCH_DIR` | Compose | `/app/watch` | Container mount point that Compose passes into `WATCH_DIR`. |
+| `CONTAINER_DOWNLOAD_DIR` | Compose | `/app/downloads` | Container mount point that Compose passes into `DOWNLOAD_DIR`. |
+| `IMAGE_TAG` | Compose | `latest` | Image tag to pull from Docker Hub. |
+| `RADARR_WATCH_SUBDIR` | Runtime | `radarr` when set | Enables dual-directory mode and appends a Radarr watch subdirectory. |
+| `RADARR_DOWNLOAD_SUBDIR` | Runtime | `radarr` when set | Enables dual-directory mode and appends a Radarr download subdirectory. |
+| `SONARR_WATCH_SUBDIR` | Runtime | `sonarr` when set | Enables dual-directory mode and appends a Sonarr watch subdirectory. |
+| `SONARR_DOWNLOAD_SUBDIR` | Runtime | `sonarr` when set | Enables dual-directory mode and appends a Sonarr download subdirectory. |
+| `WATCH_INTERVAL` | Runtime | `60` | Seconds between watch-folder scans. |
+| `CHECK_INTERVAL` | Runtime | `300` | Minimum seconds between TorBox status polling passes. |
+| `PROGRESS_INTERVAL` | Runtime | `15` | Seconds between local progress updates. |
+| `MAX_TRACKING_IDLE_HOURS` | Runtime | `24` | Drops a tracked item only after this many idle hours. |
+| `MAX_RETRIES` | Runtime | `2` | API retry limit. |
+| `MAX_STATUS_CHECK_FAILURES` | Runtime | `5` | Consecutive status exception threshold before dropping a tracked item. |
+| `MAX_NOT_FOUND_FAILURES` | Runtime | `3` | Consecutive "not found" threshold before dropping a tracked item. |
+| `MAX_DOWNLOAD_LINK_FAILURES` | Runtime | `3` | Consecutive download-link failure threshold before dropping a tracked item. |
+| `GENERIC_WEBHOOK_URLS` | Runtime | empty | Comma-separated generic webhook endpoints for `download_dropped` events. |
+| `DISCORD_WEBHOOK_URLS` | Runtime | empty | Comma-separated Discord webhook URLs for `download_dropped` summaries. |
+| `WEBHOOK_TIMEOUT_SECONDS` | Runtime | `5` | Per-webhook timeout in seconds. |
+| `ALLOW_ZIP` | Runtime | `false` | Allows TorBox ZIP downloads when appropriate. |
+| `SEED_PREFERENCE` | Runtime | `1` | Torrent seed preference for TorBox. |
+| `POST_PROCESSING` | Runtime | `-1` | Usenet post-processing setting for TorBox. |
+| `QUEUE_IMMEDIATELY` | Runtime | `false` | Whether submissions should enter TorBox's queue immediately. |
 
-1.  Install dependencies:
+Setting any `*_SUBDIR` variable enables dual-directory mode. If you want a single watch/download pair, comment out all four subdirectory variables.
 
-    ```bash
-    pip install -r requirements.txt
-    ```
+Tracked items emit an internal `download_dropped` event for terminal failures. Generic webhooks receive the full JSON body. Discord webhooks receive a compact text summary.
 
-2.  **Create a `.env` file** from the example template:
+## Sonarr and Radarr
 
-    ```bash
-    cp .env.example .env
-    ```
+With the default Docker configuration:
 
-3.  **Edit the `.env` file** and set your `TORBOX_API_KEY` and other environment variables as needed.
+- Radarr uses `/app/watch/radarr` and `/app/downloads/radarr`
+- Sonarr uses `/app/watch/sonarr` and `/app/downloads/sonarr`
 
-4.  Run the application:
+If you run Sonarr or Radarr in Docker too, mount the same host paths into those containers and point their blackhole folders at the matching in-container subdirectories.
 
-    ```bash
-    python main.py
-    ```
+## Local Source Run
 
-    Make sure you have created the `watch`, and `downloads` directories in your project root.
+Install dependencies and run from the repo root:
+
+```bash
+pip install -r requirements.txt
+cp .env.example .env
+python main.py
+```
+
+For local runs, update `WATCH_DIR` and `DOWNLOAD_DIR` in `.env` to real local paths instead of the Docker defaults.
 
 ## Testing
 
-Install the dev dependencies before running the offline test suite:
-
 ```bash
 pip install -r requirements-dev.txt
+python -m pytest -q
 ```
 
-Supported commands from the repo root:
+CI runs the Python test suite on Windows and Ubuntu and also performs a Docker build smoke check on Ubuntu.
+
+## Image Tags
+
+Docker tags are derived from [`version.py`](version.py). Releases publish these tags:
+
+- `<major>.<minor>.<patch>`
+- `<major>.<minor>`
+- `<major>`
+- `latest`
+
+Manual release steps are documented in [`RELEASING.md`](RELEASING.md).
+
+## Contributor Build
+
+If you want to build the image locally from source instead of pulling from Docker Hub:
 
 ```bash
-python -m pytest -q
-pytest -q
+docker build --build-arg APP_VERSION=$(python -c "from version import __version__; print(__version__)") -t torbox-auto-downloader:local .
 ```
-
-## Integration with Sonarr/Radarr
-
-This project is designed to work with both Sonarr and Radarr simultaneously using separate watch and download directories for each.
-
-**Configuration Steps for Radarr/Sonarr:**
-
-1.  Go to **Settings** -> **Download Clients** in Radarr.
-2.  Click the **+** button to add a new download client.
-3.  Select **Torrent Blackhole** or **Usenet Blackhole** (or both, repeating these steps for each).
-4.  Give the download client a descriptive name (e.g., "TorBox Torrent Blackhole").
-5.  Set the **Torrent/Usenet Folder** to the Radarr or Sonarr watch directory (e.g., `/app/watch/radarr` for Radarr if using the default Docker configuration). This path must match the `RADARR_WATCH_DIR` or `SONARR_WATCH_DIR` environment variable inside the container.
-6.  Set the **Watch Folder** to the Radarr or Sonarr downloads directory (e.g., `/app/downloads/radarr` for Radarr if using the default Docker configuration). This path must match the `RADARR_DOWNLOAD_DIR` or `SONARR_WATCH_DIR` environment variable inside the container.
-
-**Note:** If you're running Sonarr/Radarr in Docker, make sure to mount the same host directories to both containers. For example, if you mount `/mnt/user/downloads/temp` to `/app/watch` in the TorBox container, you should mount the same `/mnt/user/downloads/temp` to a path in your Sonarr/Radarr containers and use the appropriate subdirectory paths.

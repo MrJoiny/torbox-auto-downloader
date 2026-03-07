@@ -188,6 +188,59 @@ def test_cleanup_stale_downloads_skips_locally_active_identifiers(watcher_app, t
     assert watcher_app.download_tracker.get_download_info(identifier) is not None
 
 
+def test_wait_until_next_scan_runs_periodic_status_checks_for_tracked_downloads(
+    temp_config,
+    fake_notifier,
+    monkeypatch,
+):
+    from watcher import TorBoxWatcherApp
+
+    app = TorBoxWatcherApp(
+        temp_config(
+            WATCH_INTERVAL=30,
+            CHECK_INTERVAL=20,
+            PROGRESS_INTERVAL=7,
+        )
+    )
+    app.webhook_notifier = fake_notifier
+    app.download_tracker.track_download(
+        identifier="usenet:id:1",
+        download_type="usenet",
+        file_stem="Release",
+        download_id="1",
+        download_dir=app.config.RADARR_DOWNLOAD_DIR,
+    )
+
+    now = {"value": 0.0}
+    wait_calls = []
+    status_calls = []
+    cleanup_calls = []
+
+    app._monotonic = lambda: now["value"]
+
+    def fake_wait(seconds):
+        wait_calls.append(seconds)
+        now["value"] += seconds
+        return False
+
+    monkeypatch.setattr(app, "_wait_for_stop", fake_wait)
+    monkeypatch.setattr(
+        app,
+        "_run_scheduled_status_check",
+        lambda: status_calls.append(now["value"]) or False,
+    )
+    monkeypatch.setattr(
+        app,
+        "cleanup_stale_downloads",
+        lambda: cleanup_calls.append(now["value"]) or 0,
+    )
+
+    assert app._wait_until_next_scan() is False
+    assert wait_calls == [7, 7, 7, 7, 2]
+    assert status_calls == [7.0, 14.0, 21.0, 28.0]
+    assert cleanup_calls == [7.0, 14.0, 21.0, 28.0]
+
+
 def test_run_performs_one_iteration_and_exits_cleanly_on_keyboard_interrupt(
     watcher_app,
     monkeypatch,

@@ -211,6 +211,23 @@ class TorBoxAPIClient:
         params = self._parse_query_string(query_param)
         return self._get(endpoint, params=params)
 
+    def get_queued_list(self, queue_type, queued_id=None):
+        """
+        Retrieves queued downloads from the TorBox API.
+
+        Args:
+            queue_type (str): The queued download type (for example "torrent" or "usenet").
+            queued_id (str, optional): Specific queued item ID to retrieve.
+
+        Returns:
+            dict: The API response.
+        """
+        endpoint = "/queued/getqueued"
+        params = {"type": queue_type}
+        if queued_id is not None:
+            params["id"] = queued_id
+        return self._get(endpoint, params=params)
+
     def request_usenet_download_link(self, usenet_id, zip_link=False):
         """
         Requests a download link for a specific usenet download from the TorBox API.

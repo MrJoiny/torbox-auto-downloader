@@ -241,9 +241,10 @@ class FileProcessor:
         download_path,
         download_name,
         download_id,
-        download_tracking,
         active_downloads,
         download_dir,
+        on_complete=None,
+        on_failure=None,
     ):
         """
         Downloads a file from a URL with progress tracking and resume capability.
@@ -253,9 +254,10 @@ class FileProcessor:
             download_path (Path): The destination path for the downloaded file.
             download_name (str): name of the download.
             download_id (str): The ID of the download.
-            download_tracking (dict): download tracker
             active_downloads (dict): active downloads
             download_dir (Path): The destination directory for this specific download.
+            on_complete (callable, optional): Callback invoked with download_id on success.
+            on_failure (callable, optional): Callback invoked with download_id, reason, details on failure.
         """
         logger.info(f"Starting download: {download_name} to {download_path}")
         max_retries = 10
@@ -325,8 +327,17 @@ class FileProcessor:
                     
                     if download_path.suffix.lower() == ".zip":
                         download_stats.should_stop = True
-                        self.extract_zip(download_path, active_downloads, download_dir)
+                        if not self.extract_zip(download_path, active_downloads, download_dir):
+                            if on_failure:
+                                on_failure(
+                                    download_id,
+                                    "zip_extraction_failed",
+                                    f"Failed to extract ZIP archive: {download_path.name}",
+                                )
+                            return False
                     
+                    if on_complete:
+                        on_complete(download_id)
                     break  # Exit retry loop on success
                     
                 except (requests.exceptions.ConnectionError, 
@@ -348,19 +359,25 @@ class FileProcessor:
                         logger.error(f"Max retries reached for {download_name}. Download failed.")
                         raise
 
+            return True
+
         except requests.exceptions.RequestException as e:
             logger.error(f"Download error for ID {download_id}: {e}")
             if download_id in active_downloads:
                 active_downloads[download_id].should_stop = True
+            if on_failure:
+                on_failure(download_id, "local_download_failed", str(e))
+            return False
         except Exception as e:
             logger.error(f"Unexpected error during download for ID {download_id}: {e}")
             if download_id in active_downloads:
                 active_downloads[download_id].should_stop = True
+            if on_failure:
+                on_failure(download_id, "local_download_failed", str(e))
+            return False
         finally:
             if download_id in active_downloads:
                 active_downloads[download_id].should_stop = True
-            if download_id in download_tracking:
-                del download_tracking[download_id]
 
     def _stats_update_thread(self, download_id, stats, active_downloads):
         """
@@ -468,12 +485,14 @@ class FileProcessor:
             )
             zip_path.unlink()  # Delete ZIP after extraction
             logger.info(f"Deleted ZIP file: {zip_path}")
+            return True
 
         except Exception as e:
             logger.error(f"ZIP extraction error {zip_path}: {e}")
             extract_id = "extract_" + str(zip_path)  # Re-calculate ID in case of error
             if extract_id in active_downloads:
                 active_downloads[extract_id].should_stop = True
+            return False
         finally:
             extract_id = "extract_" + str(zip_path)  # Re-calculate ID for final cleanup
             if extract_id in active_downloads:

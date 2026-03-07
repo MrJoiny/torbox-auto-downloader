@@ -205,28 +205,67 @@ def test_run_performs_one_iteration_and_exits_cleanly_on_keyboard_interrupt(
         lambda: calls.append("cleanup") or 0,
     )
     monkeypatch.setattr(
-        "watcher.time.sleep",
-        lambda seconds: calls.append(("sleep", seconds)) or (_ for _ in ()).throw(KeyboardInterrupt()),
+        watcher_app,
+        "_wait_for_stop",
+        lambda seconds: calls.append(("wait", seconds)) or (_ for _ in ()).throw(KeyboardInterrupt()),
     )
 
     watcher_app.run()
 
-    assert calls == ["scan", "status", "cleanup", ("sleep", watcher_app.config.WATCH_INTERVAL)]
+    assert calls == ["scan", "status", "cleanup", ("wait", watcher_app.config.WATCH_INTERVAL)]
 
 
 def test_run_sleeps_five_seconds_after_unexpected_loop_error(watcher_app, monkeypatch):
-    sleep_calls = []
+    wait_calls = []
     attempts = {"count": 0}
 
     def fake_scan_watch_directory():
         attempts["count"] += 1
         if attempts["count"] == 1:
             raise RuntimeError("boom")
-        raise KeyboardInterrupt()
+        watcher_app.request_stop()
 
     monkeypatch.setattr(watcher_app, "scan_watch_directory", fake_scan_watch_directory)
-    monkeypatch.setattr("watcher.time.sleep", lambda seconds: sleep_calls.append(seconds))
+    monkeypatch.setattr(
+        watcher_app,
+        "_wait_for_stop",
+        lambda seconds: wait_calls.append(seconds) or False,
+    )
 
     watcher_app.run()
 
-    assert sleep_calls == [5]
+    assert wait_calls == [5]
+
+
+def test_run_exits_promptly_when_stop_is_requested_during_wait(watcher_app, monkeypatch):
+    calls = []
+    monkeypatch.setattr(watcher_app, "scan_watch_directory", lambda: calls.append("scan"))
+    monkeypatch.setattr(
+        watcher_app,
+        "_run_scheduled_status_check",
+        lambda: calls.append("status") or True,
+    )
+    monkeypatch.setattr(
+        watcher_app,
+        "cleanup_stale_downloads",
+        lambda: calls.append("cleanup") or 0,
+    )
+    monkeypatch.setattr(
+        watcher_app,
+        "_wait_for_stop",
+        lambda seconds: calls.append(("wait", seconds)) or watcher_app.request_stop() or True,
+    )
+
+    watcher_app.run()
+
+    assert watcher_app.stop_requested is True
+    assert calls == ["scan", "status", "cleanup", ("wait", watcher_app.config.WATCH_INTERVAL)]
+
+
+def test_shutdown_signals_active_progress_entries_to_stop(watcher_app):
+    stats = type("Stats", (), {"should_stop": False})()
+    watcher_app.active_downloads["torrent:id:1"] = stats
+
+    watcher_app.shutdown()
+
+    assert stats.should_stop is True

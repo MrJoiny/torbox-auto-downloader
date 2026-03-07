@@ -1,5 +1,6 @@
 import time
 import logging
+import threading
 from pathlib import Path
 import json
 import os
@@ -50,6 +51,7 @@ class TorBoxWatcherApp:
         )  # Track active downloads here, passed to file_processor
         self.last_status_check_at = None
         self._monotonic = time.monotonic
+        self._stop_event = threading.Event()
 
         # Ensure directories exist
         config.RADARR_WATCH_DIR.mkdir(parents=True, exist_ok=True)
@@ -74,6 +76,31 @@ class TorBoxWatcherApp:
             logger.info(f"Download directory: {config.RADARR_DOWNLOAD_DIR}")
         
         logger.info(f"Progress updates every {config.PROGRESS_INTERVAL} seconds")
+
+    @property
+    def stop_requested(self):
+        """Returns whether shutdown has been requested."""
+        return self._stop_event.is_set()
+
+    def request_stop(self):
+        """Requests a graceful shutdown of the watcher loop."""
+        self._stop_event.set()
+
+    def shutdown(self):
+        """Signals any active progress or extraction threads to stop."""
+        self.file_processor.stop_active_operations(self.active_downloads)
+
+    def _wait_for_stop(self, timeout):
+        """
+        Waits for shutdown to be requested.
+
+        Args:
+            timeout (int | float): Maximum number of seconds to wait.
+
+        Returns:
+            bool: ``True`` if shutdown was requested during the wait, otherwise ``False``.
+        """
+        return self._stop_event.wait(timeout)
 
     def _build_drop_event(self, identifier, tracking_info, reason, details=None):
         """
@@ -950,20 +977,35 @@ class TorBoxWatcherApp:
         and sleeps for a configured interval.
         """
         logger.info("Starting TorBox Watcher")
-        while True:
-            try:
-                self.scan_watch_directory()
-                self._run_scheduled_status_check()
-                self.cleanup_stale_downloads()
-                
-                logger.info(
-                    f"Waiting {self.config.WATCH_INTERVAL} seconds until next scan"
-                )
-                time.sleep(self.config.WATCH_INTERVAL)
+        try:
+            while not self.stop_requested:
+                try:
+                    self.scan_watch_directory()
+                    if self.stop_requested:
+                        break
 
-            except KeyboardInterrupt:
-                logger.info("Received keyboard interrupt. Shutting down...")
-                break
-            except Exception as e:
-                logger.error(f"Unexpected error in main loop: {e}")
-                time.sleep(5)  # Wait before next loop in case of error
+                    self._run_scheduled_status_check()
+                    if self.stop_requested:
+                        break
+
+                    self.cleanup_stale_downloads()
+                    if self.stop_requested:
+                        break
+
+                    logger.info(
+                        f"Waiting {self.config.WATCH_INTERVAL} seconds until next scan"
+                    )
+                    if self._wait_for_stop(self.config.WATCH_INTERVAL):
+                        logger.info("Shutdown requested. Exiting main loop.")
+                        break
+
+                except KeyboardInterrupt:
+                    logger.info("Received keyboard interrupt. Shutting down...")
+                    self.request_stop()
+                except Exception as e:
+                    logger.error(f"Unexpected error in main loop: {e}")
+                    if self._wait_for_stop(5):
+                        logger.info("Shutdown requested during error backoff. Exiting main loop.")
+                        break
+        finally:
+            self.shutdown()

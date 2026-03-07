@@ -1,17 +1,12 @@
 services:
   torbox:
-    build: .
-    image: torbox_auto_downloader:local
+    image: mrjoiny/torbox-auto-downloader:${IMAGE_TAG:-latest}
     volumes:
       - ${HOST_WATCH_PATH}:${CONTAINER_WATCH_DIR}
       - ${HOST_DOWNLOAD_PATH}:${CONTAINER_DOWNLOAD_DIR}
     env_file:
       - .env
     environment:
-      # Override API base/version if needed (defaults in .env)
-      - TORBOX_API_BASE=${TORBOX_API_BASE}
-      - TORBOX_API_VERSION=${TORBOX_API_VERSION}
-      # Pass container paths to the application
-      - WATCH_DIR=${CONTAINER_WATCH_DIR}
-      - DOWNLOAD_DIR=${CONTAINER_DOWNLOAD_DIR}
+      WATCH_DIR: ${CONTAINER_WATCH_DIR}
+      DOWNLOAD_DIR: ${CONTAINER_DOWNLOAD_DIR}
     restart: unless-stopped

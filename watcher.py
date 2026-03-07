@@ -584,7 +584,46 @@ class TorBoxWatcherApp:
             return self._check_active_status(identifier, tracking_info, download_type)
 
         logger.debug(f"Checking queued {download_type} status using queued_id={queued_id}")
-        status_data = self.api_client.get_queued_list(download_type, queued_id=queued_id)
+        try:
+            status_data = self.api_client.get_queued_list(download_type, queued_id=queued_id)
+        except Exception as exc:
+            logger.warning(
+                "Queued %s lookup failed for %s (queued_id=%s): %s. Attempting active lookup.",
+                download_type,
+                identifier,
+                queued_id,
+                exc,
+            )
+            download_data, query_description = self._get_active_status_data(
+                identifier,
+                tracking_info,
+                download_type,
+            )
+            if not download_data:
+                logger.info(
+                    "Queued %s [%s] was not available from the queue endpoint, and active lookup "
+                    "using %s did not find a match yet. Keeping it queued for now.",
+                    download_type,
+                    identifier,
+                    query_description,
+                )
+                return False
+
+            self.download_tracker.mark_activity(identifier)
+            self.download_tracker.reset_failure_count(identifier, "not_found")
+            self._sync_tracking_from_active_item(
+                identifier,
+                tracking_info,
+                download_data,
+                download_type,
+            )
+            logger.info(
+                "%s [%s] recovered from queue lookup failure via active lookup.",
+                download_type.capitalize(),
+                identifier,
+            )
+            refreshed_tracking_info = self.download_tracker.get_download_info(identifier) or tracking_info
+            return self._check_active_status(identifier, refreshed_tracking_info, download_type)
 
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(f"Queued {download_type} status response: {json.dumps(status_data)}")

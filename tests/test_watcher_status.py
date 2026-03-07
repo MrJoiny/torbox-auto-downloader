@@ -239,6 +239,60 @@ def test_missing_queued_item_falls_back_to_active_lookup(watcher_app, track_down
     assert calls == [(identifier, "q1", "torrent")]
 
 
+def test_queued_lookup_exception_recovers_via_active_hash_lookup(watcher_app, track_download):
+    identifier = track_download(
+        watcher_app,
+        identifier="usenet:queued:q1",
+        download_type="usenet",
+        state="queued",
+        download_id=None,
+        queued_id="q1",
+        download_hash="hash-usenet",
+    )
+    watcher_app.api_client.get_queued_list = lambda queue_type, queued_id=None: (_ for _ in ()).throw(
+        RuntimeError("queue unavailable")
+    )
+    watcher_app.api_client.get_usenet_list = lambda query_param=None: {
+        "data": {
+            "id": 945176,
+            "download_id": "SABnzbd_nzo_g3tb9ywy",
+            "hash": "hash-usenet",
+            "download_state": "downloading",
+            "progress": 0.5,
+            "size": 123,
+            "download_present": False,
+        }
+    }
+
+    assert watcher_app._check_download_status_common(identifier, "usenet") is False
+    info = watcher_app.download_tracker.get_download_info(identifier)
+    assert info["state"] == "active"
+    assert info["id"] == "945176"
+    assert info["failure_counts"]["status_exception"] == 0
+
+
+def test_queued_lookup_exception_without_active_match_keeps_item_queued(watcher_app, track_download):
+    identifier = track_download(
+        watcher_app,
+        identifier="torrent:queued:q1",
+        state="queued",
+        download_id=None,
+        queued_id="q1",
+        download_hash="hash1",
+    )
+    watcher_app.api_client.get_queued_list = lambda queue_type, queued_id=None: (_ for _ in ()).throw(
+        RuntimeError("queue unavailable")
+    )
+    watcher_app.api_client.get_torrent_list = lambda query_param=None: {"data": []}
+
+    assert watcher_app._check_download_status_common(identifier, "torrent") is False
+    info = watcher_app.download_tracker.get_download_info(identifier)
+    assert info["state"] == "queued"
+    assert info["id"] is None
+    assert info["failure_counts"]["status_exception"] == 0
+    assert info["failure_counts"]["not_found"] == 0
+
+
 def test_check_download_status_updates_single_file_name_and_requests_download(
     watcher_app,
     track_download,

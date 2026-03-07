@@ -103,9 +103,10 @@ class DownloadStats:
         Returns:
             float: The estimated time remaining in seconds, or None if total_size or speed is not available.
         """
-        if self.total_size and self.get_speed() > 0:
+        speed = self.get_speed()
+        if self.total_size and speed > 0:
             remaining_bytes = self.total_size - self.downloaded
-            return remaining_bytes / self.get_speed()
+            return remaining_bytes / speed
         return None
 
     def print_stats(self):

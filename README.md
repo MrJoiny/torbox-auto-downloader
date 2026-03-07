@@ -148,6 +148,21 @@ Tracked items emit an internal `download_dropped` event whenever they are remove
 
     Make sure you have created the `watch`, and `downloads` directories in your project root.
 
+## Testing
+
+Install the dev dependencies before running the offline test suite:
+
+```bash
+pip install -r requirements-dev.txt
+```
+
+Supported commands from the repo root:
+
+```bash
+python -m pytest -q
+pytest -q
+```
+
 ## Integration with Sonarr/Radarr
 
 This project is designed to work with both Sonarr and Radarr simultaneously using separate watch and download directories for each.

@@ -3,24 +3,35 @@ from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
+FAILURE_COUNT_REASONS = ("status_exception", "not_found", "download_link")
+
 
 class DownloadTracker:
     """
-    Tracks submitted downloads and their types.
+    Tracks submitted downloads and their lifecycle metadata.
     """
 
     def __init__(self):
         """
-        Initializes the DownloadTracker with an empty download tracking dictionary.
+        Initializes an empty in-memory tracking table keyed by local identifier.
         """
-        self.download_tracking = {}  # {identifier: tracking_info}
+        self.download_tracking = {}
+
+    def _now_iso(self):
+        """
+        Returns the current local timestamp in ISO 8601 format.
+
+        Returns:
+            str: Current local timestamp.
+        """
+        return datetime.now().isoformat()
 
     def track_download(
         self,
         identifier,
         download_type,
         file_stem,
-        original_file=None, # Made optional
+        original_file=None,
         download_id=None,
         queued_id=None,
         download_hash=None,
@@ -29,43 +40,48 @@ class DownloadTracker:
         state="active",
     ):
         """
-        Tracks a new download. Uses the provided identifier as the primary key.
+        Registers a new tracked download with lifecycle metadata and counters.
 
         Args:
-            identifier (str): A unique identifier for the download (e.g., torrent ID or hash).
-                               Must be provided and unique.
-            download_type (str): The type of download ("torrent" or "usenet").
-            file_stem (str): The name for the download (e.g., original file name without ext).
-            original_file (str, optional): The path to the original file, if applicable. Defaults to None.
-            download_id (str, optional): The download ID from the API (e.g., torrent_id). Defaults to None.
-            queued_id (str, optional): The queued download ID from the API. Defaults to None.
-            download_hash (str, optional): The download hash from the API. Defaults to None.
-            download_dir (Path, optional): The destination directory for this download. Defaults to None.
-            is_multi_file (bool, optional): Whether this download contains multiple files. Defaults to False.
-            state (str, optional): Tracking state ("queued" or "active"). Defaults to "active".
+            identifier (str): Stable local identifier for the tracked item.
+            download_type (str): Download type, such as ``torrent`` or ``usenet``.
+            file_stem (str): Display name for the tracked item.
+            original_file (str | Path, optional): Source file path if one exists.
+            download_id (str, optional): Active TorBox download ID.
+            queued_id (str, optional): TorBox queued item ID.
+            download_hash (str, optional): TorBox download hash.
+            download_dir (str | Path, optional): Destination directory for the local download.
+            is_multi_file (bool, optional): Whether the download should be treated as multi-file.
+            state (str, optional): Current tracker state, usually ``queued`` or ``active``.
 
         Returns:
-            bool: True if tracking was successfully initiated, False if already tracked.
+            bool: ``True`` when the download was newly tracked, otherwise ``False``.
         """
         if str(identifier) in self.download_tracking:
-            logger.warning(f"Attempted to track already tracked identifier: {identifier}")
+            logger.warning("Attempted to track already tracked identifier: %s", identifier)
             return False
 
+        timestamp = self._now_iso()
         self.download_tracking[str(identifier)] = {
             "type": download_type,
             "name": file_stem,
-            "submitted_at": datetime.now().isoformat(),
+            "submitted_at": timestamp,
+            "last_activity_at": timestamp,
             "original_file": str(original_file) if original_file else None,
             "state": state,
-            "id": download_id, # Store the specific API ID if provided
-            "queued_id": queued_id, # Store queued API ID if provided
-            "hash": download_hash, # Store the hash if provided
+            "id": download_id,
+            "queued_id": queued_id,
+            "hash": download_hash,
             "download_dir": str(download_dir) if download_dir else None,
-            "failure_count": 0,  # Track consecutive failures
-            "is_multi_file": is_multi_file,  # Track if this is a multi-file download
+            "failure_counts": {reason: 0 for reason in FAILURE_COUNT_REASONS},
+            "is_multi_file": is_multi_file,
         }
         logger.info(
-            f"Tracking new {download_type} download: Identifier: {identifier}, Name: {file_stem}, Dest: {download_dir}"
+            "Tracking new %s download: Identifier: %s, Name: %s, Dest: %s",
+            download_type,
+            identifier,
+            file_stem,
+            download_dir,
         )
         return True
 
@@ -78,21 +94,21 @@ class DownloadTracker:
         download_hash=None,
     ):
         """
-        Updates the tracking reference for an existing download without changing its tracker key.
+        Updates the API-side identifiers and state for an existing tracked item.
 
         Args:
-            identifier (str): The stable tracker key for the download.
-            state (str, optional): Updated tracking state.
-            queued_id (str, optional): Updated queued ID.
+            identifier (str): Stable local identifier for the tracked item.
+            state (str, optional): Updated tracker state.
+            queued_id (str, optional): Updated queued item ID.
             download_id (str, optional): Updated active download ID.
             download_hash (str, optional): Updated download hash.
 
         Returns:
-            bool: True if the entry was updated, False if the download is unknown.
+            bool: ``True`` when the tracked item exists, otherwise ``False``.
         """
         tracking_info = self.download_tracking.get(str(identifier))
         if not tracking_info:
-            logger.warning(f"Cannot update tracking reference for unknown identifier: {identifier}")
+            logger.warning("Cannot update tracking reference for unknown identifier: %s", identifier)
             return False
 
         changes = []
@@ -113,116 +129,176 @@ class DownloadTracker:
             tracking_info["hash"] = download_hash
 
         if changes:
-            logger.info(f"Updated tracking reference for {identifier}: {', '.join(changes)}")
+            logger.info("Updated tracking reference for %s: %s", identifier, ", ".join(changes))
 
         return True
 
-    def increment_failure_count(self, identifier):
+    def mark_activity(self, identifier):
         """
-        Increments the failure count for a download.
+        Refreshes the tracked item's last-activity timestamp.
 
         Args:
-            identifier (str): The identifier of the download.
+            identifier (str): Stable local identifier for the tracked item.
 
         Returns:
-            int: The new failure count, or None if download not found.
+            bool: ``True`` if the tracked item exists, otherwise ``False``.
         """
-        if str(identifier) in self.download_tracking:
-            self.download_tracking[str(identifier)]["failure_count"] += 1
-            return self.download_tracking[str(identifier)]["failure_count"]
-        return None
+        tracking_info = self.download_tracking.get(str(identifier))
+        if not tracking_info:
+            return False
 
-    def reset_failure_count(self, identifier):
+        tracking_info["last_activity_at"] = self._now_iso()
+        return True
+
+    def increment_failure_count(self, identifier, reason):
         """
-        Resets the failure count for a download (on successful check).
+        Increments a single reason-specific failure counter for a tracked item.
 
         Args:
-            identifier (str): The identifier of the download.
+            identifier (str): Stable local identifier for the tracked item.
+            reason (str): Failure counter key to increment.
+
+        Returns:
+            int | None: The updated counter value, or ``None`` if the item is unknown.
+
+        Raises:
+            ValueError: If ``reason`` is not a supported failure counter.
         """
-        if str(identifier) in self.download_tracking:
-            self.download_tracking[str(identifier)]["failure_count"] = 0
+        if reason not in FAILURE_COUNT_REASONS:
+            raise ValueError(f"Unknown failure count reason: {reason}")
+
+        tracking_info = self.download_tracking.get(str(identifier))
+        if not tracking_info:
+            return None
+
+        tracking_info["failure_counts"][reason] += 1
+        return tracking_info["failure_counts"][reason]
+
+    def reset_failure_count(self, identifier, reason=None):
+        """
+        Resets one failure counter or all counters for a tracked item.
+
+        Args:
+            identifier (str): Stable local identifier for the tracked item.
+            reason (str, optional): Specific failure counter key to reset. When omitted,
+                all failure counters are reset.
+
+        Returns:
+            bool: ``True`` if the tracked item exists, otherwise ``False``.
+
+        Raises:
+            ValueError: If ``reason`` is not a supported failure counter.
+        """
+        tracking_info = self.download_tracking.get(str(identifier))
+        if not tracking_info:
+            return False
+
+        if reason is None:
+            for key in FAILURE_COUNT_REASONS:
+                tracking_info["failure_counts"][key] = 0
+            return True
+
+        if reason not in FAILURE_COUNT_REASONS:
+            raise ValueError(f"Unknown failure count reason: {reason}")
+
+        tracking_info["failure_counts"][reason] = 0
+        return True
 
     def update_filename(self, identifier, filename, is_multi_file=False):
         """
-        Updates the filename for a tracked download.
+        Updates the resolved output filename stored for a tracked item.
 
         Args:
-            identifier (str): The identifier of the download.
-            filename (str): The new filename to use.
-            is_multi_file (bool): Whether this is a multi-file download (for forcing ZIP).
+            identifier (str): Stable local identifier for the tracked item.
+            filename (str): Resolved filename to store.
+            is_multi_file (bool, optional): Whether the download should be treated as multi-file.
         """
         if str(identifier) in self.download_tracking:
             old_name = self.download_tracking[str(identifier)]["name"]
             self.download_tracking[str(identifier)]["name"] = filename
             self.download_tracking[str(identifier)]["is_multi_file"] = is_multi_file
-            logger.info(f"Updated filename for {identifier}: {old_name} -> {filename}{' (multi-file)' if is_multi_file else ''}")
+            logger.info(
+                "Updated filename for %s: %s -> %s%s",
+                identifier,
+                old_name,
+                filename,
+                " (multi-file)" if is_multi_file else "",
+            )
         else:
-            logger.warning(f"Cannot update filename for unknown identifier: {identifier}")
+            logger.warning("Cannot update filename for unknown identifier: %s", identifier)
 
     def get_tracked_downloads(self):
         """
-        Returns all tracked downloads.
+        Returns the full mutable tracking dictionary.
 
         Returns:
-            dict: A dictionary containing tracking information for all downloads.
+            dict: Mapping of tracked identifiers to tracking metadata.
         """
         return self.download_tracking
 
-    def remove_tracked_download(self, download_id):
+    def pop_download(self, identifier):
         """
-        Removes a download from tracking.
+        Removes and returns a tracked item by identifier.
 
         Args:
-            download_id (str): The identifier of the download to remove.
+            identifier (str): Stable local identifier for the tracked item.
+
+        Returns:
+            dict | None: Removed tracking metadata, or ``None`` if the item is unknown.
         """
-        if download_id in self.download_tracking:
-            del self.download_tracking[download_id]
-            logger.info(f"Stopped tracking download identifier: {download_id}")
+        tracking_info = self.download_tracking.pop(str(identifier), None)
+        if tracking_info:
+            logger.info("Stopped tracking download identifier: %s", identifier)
+        return tracking_info
+
+    def remove_tracked_download(self, identifier):
+        """
+        Removes a tracked item without returning it.
+
+        Args:
+            identifier (str): Stable local identifier for the tracked item.
+        """
+        self.pop_download(identifier)
 
     def get_download_info(self, identifier):
         """
-        Retrieves tracking information for a given download identifier.
+        Returns tracking metadata for a single identifier, if present.
 
         Args:
-            identifier (str): The identifier of the download.
+            identifier (str): Stable local identifier for the tracked item.
 
         Returns:
-            dict: Tracking information for the download, or None if not found.
+            dict | None: Tracking metadata, or ``None`` if the item is unknown.
         """
         return self.download_tracking.get(str(identifier))
 
-    def cleanup_old_downloads(self, max_age_hours=24):
+    def get_stale_download_identifiers(self, max_idle_hours=24, now=None):
         """
-        Removes downloads that have been tracked for longer than max_age_hours.
-        This prevents memory leaks from downloads that never complete.
+        Returns identifiers whose idle time exceeds the configured threshold.
 
         Args:
-            max_age_hours (int): Maximum age in hours before removing a download. Defaults to 24.
+            max_idle_hours (int, optional): Idle threshold in hours.
+            now (datetime, optional): Timestamp used for the idle-time comparison.
 
         Returns:
-            int: Number of downloads removed.
+            list[str]: Identifiers whose ``last_activity_at`` is older than the threshold.
         """
-        now = datetime.now()
-        to_remove = []
-        
+        current_time = now or datetime.now()
+        stale_identifiers = []
+
         for identifier, info in self.download_tracking.items():
             try:
-                submitted_at = datetime.fromisoformat(info["submitted_at"])
-                age = now - submitted_at
-                
-                if age > timedelta(hours=max_age_hours):
-                    to_remove.append(identifier)
+                last_activity_at = datetime.fromisoformat(info["last_activity_at"])
+                idle_time = current_time - last_activity_at
+                if idle_time > timedelta(hours=max_idle_hours):
+                    stale_identifiers.append(identifier)
                     logger.warning(
-                        f"Removing stale download {identifier} ({info['name']}) - "
-                        f"tracked for {age.total_seconds()/3600:.1f} hours"
+                        "Found stale download %s (%s) idle for %.1f hours",
+                        identifier,
+                        info["name"],
+                        idle_time.total_seconds() / 3600,
                     )
-            except (KeyError, ValueError) as e:
-                logger.error(f"Error checking age of download {identifier}: {e}")
-        
-        for identifier in to_remove:
-            del self.download_tracking[identifier]
-        
-        if to_remove:
-            logger.info(f"Cleaned up {len(to_remove)} stale downloads")
-        
-        return len(to_remove)
+            except (KeyError, ValueError) as exc:
+                logger.error("Error checking age of download %s: %s", identifier, exc)
+
+        return stale_identifiers

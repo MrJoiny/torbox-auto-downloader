@@ -3,11 +3,13 @@ import logging
 from pathlib import Path
 import json
 import os
+from datetime import datetime, timezone
 
 from config import Config
 from api_client import TorBoxAPIClient
 from file_processor import FileProcessor
 from download_tracker import DownloadTracker
+from webhook_notifier import WebhookNotifier
 
 # Configure logging (moved here as it's the main entry)
 logging.basicConfig(
@@ -42,9 +44,12 @@ class TorBoxWatcherApp:
             config.PROGRESS_INTERVAL,
         )
         self.download_tracker = DownloadTracker()
+        self.webhook_notifier = WebhookNotifier(config)
         self.active_downloads = (
             {}
         )  # Track active downloads here, passed to file_processor
+        self.last_status_check_at = None
+        self._monotonic = time.monotonic
 
         # Ensure directories exist
         config.RADARR_WATCH_DIR.mkdir(parents=True, exist_ok=True)
@@ -69,6 +74,192 @@ class TorBoxWatcherApp:
             logger.info(f"Download directory: {config.RADARR_DOWNLOAD_DIR}")
         
         logger.info(f"Progress updates every {config.PROGRESS_INTERVAL} seconds")
+
+    def _build_drop_event(self, identifier, tracking_info, reason, details=None):
+        """
+        Builds the structured internal event payload for a terminal drop.
+
+        Args:
+            identifier (str): Stable local identifier for the tracked item.
+            tracking_info (dict): Tracking metadata captured before removal.
+            reason (str): Terminal drop reason code.
+            details (str, optional): Human-readable detail string.
+
+        Returns:
+            dict: Structured `download_dropped` event payload.
+        """
+        return {
+            "event": "download_dropped",
+            "reason": reason,
+            "download_type": tracking_info.get("type"),
+            "identifier": identifier,
+            "name": tracking_info.get("name"),
+            "state": tracking_info.get("state"),
+            "queued_id": tracking_info.get("queued_id"),
+            "download_id": tracking_info.get("id"),
+            "download_hash": tracking_info.get("hash"),
+            "download_dir": tracking_info.get("download_dir"),
+            "failure_counts": dict(tracking_info.get("failure_counts", {})),
+            "submitted_at": tracking_info.get("submitted_at"),
+            "last_activity_at": tracking_info.get("last_activity_at"),
+            "details": details,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+
+    def _complete_tracked_download(self, identifier):
+        """
+        Finalizes a tracked download after successful local processing.
+
+        Args:
+            identifier (str): Stable local identifier for the tracked item.
+
+        Returns:
+            bool: ``True`` when the tracked item existed and was removed, otherwise ``False``.
+        """
+        tracking_info = self.download_tracker.pop_download(identifier)
+        if not tracking_info:
+            logger.warning("Attempted to complete unknown tracked download: %s", identifier)
+            return False
+
+        logger.info(
+            "Completed tracked %s download: %s (%s)",
+            tracking_info.get("type"),
+            tracking_info.get("name"),
+            identifier,
+        )
+        return True
+
+    def _drop_tracked_download(self, identifier, reason, details=None):
+        """
+        Removes a tracked download for a terminal failure and emits a webhook event.
+
+        Args:
+            identifier (str): Stable local identifier for the tracked item.
+            reason (str): Terminal drop reason code.
+            details (str, optional): Human-readable detail string.
+
+        Returns:
+            bool: ``True`` when the tracked item existed and was dropped, otherwise ``False``.
+        """
+        tracking_info = self.download_tracker.pop_download(identifier)
+        if not tracking_info:
+            logger.warning(
+                "Attempted to drop unknown tracked download: %s (reason=%s)",
+                identifier,
+                reason,
+            )
+            return False
+
+        logger.error(
+            "Dropping tracked %s download %s (%s): %s",
+            tracking_info.get("type"),
+            tracking_info.get("name"),
+            identifier,
+            reason,
+        )
+        self.webhook_notifier.notify_download_dropped(
+            self._build_drop_event(identifier, tracking_info, reason, details=details)
+        )
+        return True
+
+    def _increment_failure_and_maybe_drop(
+        self,
+        identifier,
+        failure_reason,
+        max_failures,
+        drop_reason,
+        details,
+    ):
+        """
+        Increments a reason-specific counter and drops once its threshold is reached.
+
+        Args:
+            identifier (str): Stable local identifier for the tracked item.
+            failure_reason (str): Failure counter key to increment.
+            max_failures (int): Threshold that triggers a terminal drop.
+            drop_reason (str): Terminal drop reason code.
+            details (str): Human-readable detail string for the drop event.
+
+        Returns:
+            bool: ``True`` if the item was dropped, otherwise ``False``.
+        """
+        failure_count = self.download_tracker.increment_failure_count(identifier, failure_reason)
+        if failure_count is None:
+            return False
+
+        if failure_count >= max_failures:
+            self._drop_tracked_download(identifier, drop_reason, details=details)
+            return True
+
+        return False
+
+    def _should_run_status_check(self, now=None):
+        """
+        Returns whether the next status-polling pass is due.
+
+        Args:
+            now (float, optional): Monotonic timestamp override used for testing.
+
+        Returns:
+            bool: ``True`` when status polling should run, otherwise ``False``.
+        """
+        current_time = self._monotonic() if now is None else now
+        return (
+            self.last_status_check_at is None
+            or (current_time - self.last_status_check_at) >= self.config.CHECK_INTERVAL
+        )
+
+    def _run_scheduled_status_check(self, now=None):
+        """
+        Runs a status pass only when the configured polling interval has elapsed.
+
+        Args:
+            now (float, optional): Monotonic timestamp override used for testing.
+
+        Returns:
+            bool: ``True`` if a status pass was run, otherwise ``False``.
+        """
+        current_time = self._monotonic() if now is None else now
+        if not self._should_run_status_check(now=current_time):
+            return False
+
+        self.check_download_status()
+        self.last_status_check_at = current_time
+        return True
+
+    def cleanup_stale_downloads(self, now=None):
+        """
+        Drops tracked items that have been idle past the configured timeout.
+
+        Args:
+            now (datetime, optional): Timestamp override used for idle-time comparisons.
+
+        Returns:
+            int: Number of stale tracked items dropped during the pass.
+        """
+        stale_identifiers = self.download_tracker.get_stale_download_identifiers(
+            max_idle_hours=self.config.MAX_TRACKING_IDLE_HOURS,
+            now=now,
+        )
+
+        dropped = 0
+        for identifier in stale_identifiers:
+            if identifier in self.active_downloads:
+                logger.debug("Skipping stale cleanup for locally active download: %s", identifier)
+                continue
+
+            details = (
+                "No activity observed for more than "
+                f"{self.config.MAX_TRACKING_IDLE_HOURS} hours."
+            )
+            if self._drop_tracked_download(
+                identifier,
+                "stale_tracking_timeout",
+                details=details,
+            ):
+                dropped += 1
+
+        return dropped
 
     def scan_watch_directory(self):
         """
@@ -317,6 +508,9 @@ class TorBoxWatcherApp:
             )
             return self._check_active_status(identifier, tracking_info, download_type)
 
+        self.download_tracker.mark_activity(identifier)
+        self.download_tracker.reset_failure_count(identifier, "not_found")
+
         active_id = self._extract_active_download_id(
             queue_item,
             download_type,
@@ -357,8 +551,20 @@ class TorBoxWatcherApp:
             logger.warning(
                 f"Could not find {download_type} with identifier {identifier} using {query_description}."
             )
+            self._increment_failure_and_maybe_drop(
+                identifier,
+                "not_found",
+                self.config.MAX_NOT_FOUND_FAILURES,
+                "status_not_found",
+                (
+                    f"{download_type.capitalize()} identifier {identifier} was not found "
+                    f"using {query_description}."
+                ),
+            )
             return False
 
+        self.download_tracker.mark_activity(identifier)
+        self.download_tracker.reset_failure_count(identifier, "not_found")
         self._sync_tracking_from_active_item(identifier, tracking_info, download_data, download_type)
         tracking_info = self.download_tracker.get_download_info(identifier) or tracking_info
 
@@ -390,10 +596,8 @@ class TorBoxWatcherApp:
                     self.download_tracker.update_filename(identifier, actual_filename, is_multi_file=True)
 
             if download_type == "torrent":
-                self.request_torrent_download(identifier)
-            else:
-                self.request_usenet_download(identifier)
-            return True
+                return self.request_torrent_download(identifier)
+            return self.request_usenet_download(identifier)
 
         return False
 
@@ -481,21 +685,18 @@ class TorBoxWatcherApp:
             else:
                 result = self._check_active_status(identifier, tracking_info, download_type)
 
-            self.download_tracker.reset_failure_count(identifier)
+            self.download_tracker.reset_failure_count(identifier, "status_exception")
             return result
 
         except Exception as e:
             logger.error(f"Error checking {download_type} status for identifier {identifier}: {e}")
-            
-            # Increment failure count
-            failure_count = self.download_tracker.increment_failure_count(identifier)
-            
-            if failure_count and failure_count >= self.config.MAX_STATUS_CHECK_FAILURES:
-                logger.error(
-                    f"Max status check failures ({self.config.MAX_STATUS_CHECK_FAILURES}) reached for "
-                    f"{download_type} identifier {identifier}. Removing from tracking."
-                )
-                self.download_tracker.remove_tracked_download(identifier)
+            self._increment_failure_and_maybe_drop(
+                identifier,
+                "status_exception",
+                self.config.MAX_STATUS_CHECK_FAILURES,
+                "status_check_exception",
+                f"Error checking {download_type} status for identifier {identifier}: {e}",
+            )
         
         return False
 
@@ -506,7 +707,7 @@ class TorBoxWatcherApp:
         Args:
             download_id: The ID of the torrent download (can be torrent_id or hash).
         """
-        self._check_download_status_common(download_id, "torrent")
+        return self._check_download_status_common(download_id, "torrent")
 
     def _request_download_common(self, identifier, download_type):
         """
@@ -521,13 +722,13 @@ class TorBoxWatcherApp:
             logger.warning(
                 f"No tracking info found for {download_type} identifier: {identifier} for download request."
             )
-            return
+            return False
 
         if tracking_info.get("state") == "queued":
             logger.info(
                 f"Skipping download request for queued {download_type} identifier {identifier} until TorBox assigns an active ID."
             )
-            return
+            return False
 
         request_id = tracking_info.get("id")
         if request_id is None:
@@ -549,13 +750,18 @@ class TorBoxWatcherApp:
                 logger.warning(
                     f"Unable to resolve active ID for {download_type} identifier {identifier}. Skipping download request."
                 )
-                return
+                return False
         
         # Get the download directory from tracking info
         download_dir = Path(tracking_info.get("download_dir")) if tracking_info.get("download_dir") else None
         if not download_dir:
             logger.error(f"No download directory found for {download_type} identifier {identifier}")
-            return
+            self._drop_tracked_download(
+                identifier,
+                "local_download_failed",
+                details=f"No download directory found for {download_type} identifier {identifier}.",
+            )
+            return False
 
         # Check if this is a multi-file download - if so, force zip_link=true
         is_multi_file = tracking_info.get("is_multi_file", False)
@@ -583,24 +789,45 @@ class TorBoxWatcherApp:
                 logger.info(
                     f"Got download URL for {download_type} identifier {identifier} (request_id: {request_id}): {download_url}"
                 )
+                self.download_tracker.reset_failure_count(identifier, "download_link")
+                self.download_tracker.mark_activity(identifier)
                 download_path = download_dir / tracking_info["name"]
-                self.file_processor.download_file(
+                return self.file_processor.download_file(
                     download_url,
                     download_path,
                     tracking_info["name"],
                     identifier,
-                    self.download_tracker.get_tracked_downloads(),
                     self.active_downloads,
                     download_dir,
+                    on_complete=self._complete_tracked_download,
+                    on_failure=self._drop_tracked_download,
                 )
-            else:
-                logger.error(
+            logger.error(
+                f"Failed to get download URL for {download_type} identifier {identifier} "
+                f"(request_id: {request_id}): {json.dumps(download_link_data) if logger.isEnabledFor(logging.DEBUG) else 'enable debug for details'}"
+            )
+            self._increment_failure_and_maybe_drop(
+                identifier,
+                "download_link",
+                self.config.MAX_DOWNLOAD_LINK_FAILURES,
+                "download_link_request_failed",
+                (
                     f"Failed to get download URL for {download_type} identifier {identifier} "
-                    f"(request_id: {request_id}): {json.dumps(download_link_data) if logger.isEnabledFor(logging.DEBUG) else 'enable debug for details'}"
-                )
+                    f"(request_id: {request_id})."
+                ),
+            )
+            return False
 
         except Exception as e:
             logger.error(f"Error requesting {download_type} download for identifier {identifier}: {e}")
+            self._increment_failure_and_maybe_drop(
+                identifier,
+                "download_link",
+                self.config.MAX_DOWNLOAD_LINK_FAILURES,
+                "download_link_request_failed",
+                f"Error requesting {download_type} download for identifier {identifier}: {e}",
+            )
+            return False
 
     def request_torrent_download(self, identifier):
         """
@@ -609,7 +836,7 @@ class TorBoxWatcherApp:
         Args:
             identifier: The identifier of the torrent download used for tracking.
         """
-        self._request_download_common(identifier, "torrent")
+        return self._request_download_common(identifier, "torrent")
 
     def process_nzb_file(self, file_path: Path, download_dir: Path):
         """
@@ -672,7 +899,7 @@ class TorBoxWatcherApp:
         Args:
             download_id: The ID of the usenet download (can be usenetdownload_id or hash).
         """
-        self._check_download_status_common(download_id, "usenet")
+        return self._check_download_status_common(download_id, "usenet")
 
     def request_usenet_download(self, identifier):
         """
@@ -681,7 +908,7 @@ class TorBoxWatcherApp:
         Args:
             identifier: The identifier of the usenet download used for tracking.
         """
-        self._request_download_common(identifier, "usenet")
+        return self._request_download_common(identifier, "usenet")
 
     def check_download_status(self):
         """
@@ -723,16 +950,11 @@ class TorBoxWatcherApp:
         and sleeps for a configured interval.
         """
         logger.info("Starting TorBox Watcher")
-        loop_count = 0
         while True:
             try:
                 self.scan_watch_directory()
-                self.check_download_status()
-                
-                # Clean up stale downloads every 10 loops (prevents memory leaks)
-                loop_count += 1
-                if loop_count % 10 == 0:
-                    self.download_tracker.cleanup_old_downloads(max_age_hours=24)
+                self._run_scheduled_status_check()
+                self.cleanup_stale_downloads()
                 
                 logger.info(
                     f"Waiting {self.config.WATCH_INTERVAL} seconds until next scan"

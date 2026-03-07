@@ -2,6 +2,10 @@ import os
 from pathlib import Path
 
 
+def _parse_csv_env(value):
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
 class Config:
     """
     Configuration class to load settings from environment variables.
@@ -41,6 +45,12 @@ class Config:
     CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", 300))
     MAX_RETRIES = int(os.getenv("MAX_RETRIES", 2))
     MAX_STATUS_CHECK_FAILURES = int(os.getenv("MAX_STATUS_CHECK_FAILURES", 5))
+    MAX_NOT_FOUND_FAILURES = int(os.getenv("MAX_NOT_FOUND_FAILURES", 3))
+    MAX_DOWNLOAD_LINK_FAILURES = int(os.getenv("MAX_DOWNLOAD_LINK_FAILURES", 3))
+    MAX_TRACKING_IDLE_HOURS = int(os.getenv("MAX_TRACKING_IDLE_HOURS", 24))
+    GENERIC_WEBHOOK_URLS = _parse_csv_env(os.getenv("GENERIC_WEBHOOK_URLS", ""))
+    DISCORD_WEBHOOK_URLS = _parse_csv_env(os.getenv("DISCORD_WEBHOOK_URLS", ""))
+    WEBHOOK_TIMEOUT_SECONDS = int(os.getenv("WEBHOOK_TIMEOUT_SECONDS", 5))
     ALLOW_ZIP = os.getenv("ALLOW_ZIP", "false").lower() == "true"
     SEED_PREFERENCE = int(os.getenv("SEED_PREFERENCE", 1))
     POST_PROCESSING = int(os.getenv("POST_PROCESSING", -1))

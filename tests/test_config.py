@@ -3,6 +3,21 @@ from pathlib import Path
 import pytest
 
 
+def test_local_env_file_is_loaded_for_source_runs(load_config_module, monkeypatch, tmp_path):
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        "TORBOX_API_KEY=dotenv-key\nWATCH_DIR=/dotenv/watch\nDOWNLOAD_DIR=/dotenv/downloads\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    config_module = load_config_module()
+
+    assert config_module.Config.TORBOX_API_KEY == "dotenv-key"
+    assert config_module.Config.RADARR_WATCH_DIR == Path("/dotenv/watch")
+    assert config_module.Config.RADARR_DOWNLOAD_DIR == Path("/dotenv/downloads")
+
+
 def test_parse_csv_env_trims_and_drops_empty_entries(load_config_module):
     config_module = load_config_module()
 
@@ -93,3 +108,22 @@ def test_config_parses_boolean_integer_and_webhook_env_values(load_config_module
         "https://discord.one",
         "https://discord.two",
     ]
+
+
+def test_real_environment_values_override_local_env_file(load_config_module, monkeypatch, tmp_path):
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        "TORBOX_API_KEY=dotenv-key\nWATCH_DIR=/dotenv/watch\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    config_module = load_config_module(
+        TORBOX_API_KEY="env-key",
+        WATCH_DIR="/env/watch",
+        DOWNLOAD_DIR="/env/downloads",
+    )
+
+    assert config_module.Config.TORBOX_API_KEY == "env-key"
+    assert config_module.Config.RADARR_WATCH_DIR == Path("/env/watch")
+    assert config_module.Config.RADARR_DOWNLOAD_DIR == Path("/env/downloads")

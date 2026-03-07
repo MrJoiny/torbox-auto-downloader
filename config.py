@@ -1,9 +1,21 @@
 import os
 from pathlib import Path
 
+from dotenv import load_dotenv
+
+
+def _load_local_dotenv():
+    """Load a local .env file for source-based runs without overriding real env vars."""
+    dotenv_path = Path.cwd() / ".env"
+    if dotenv_path.is_file():
+        load_dotenv(dotenv_path=dotenv_path, override=False)
+
 
 def _parse_csv_env(value):
     return [item.strip() for item in value.split(",") if item.strip()]
+
+
+_load_local_dotenv()
 
 
 class Config:

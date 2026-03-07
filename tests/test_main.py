@@ -1,4 +1,5 @@
 import pytest
+import signal
 
 import main
 
@@ -60,3 +61,43 @@ def test_main_exits_with_status_one_on_unexpected_startup_error(monkeypatch):
         main.main()
 
     assert exc_info.value.code == 1
+
+
+def test_main_installs_signal_handlers_that_request_shutdown(monkeypatch):
+    calls = []
+    installed_handlers = {}
+    watcher_app_holder = {}
+
+    class FakeConfig:
+        @staticmethod
+        def validate():
+            calls.append("validate")
+
+    class FakeWatcherApp:
+        def __init__(self, config):
+            del config
+            watcher_app_holder["app"] = self
+            self.stop_requests = 0
+
+        def request_stop(self):
+            self.stop_requests += 1
+
+        def run(self):
+            calls.append("run")
+
+    monkeypatch.setattr(main, "Config", FakeConfig)
+    monkeypatch.setattr(main, "TorBoxWatcherApp", FakeWatcherApp)
+    monkeypatch.setattr(
+        main.signal,
+        "signal",
+        lambda sig, handler: installed_handlers.setdefault(sig, handler),
+    )
+
+    main.main()
+
+    assert signal.SIGINT in installed_handlers
+    assert signal.SIGTERM in installed_handlers
+
+    installed_handlers[signal.SIGTERM](signal.SIGTERM, None)
+
+    assert watcher_app_holder["app"].stop_requests == 1

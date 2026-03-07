@@ -1,5 +1,6 @@
 import time
 import logging
+import threading
 from pathlib import Path
 import json
 import os
@@ -50,6 +51,7 @@ class TorBoxWatcherApp:
         )  # Track active downloads here, passed to file_processor
         self.last_status_check_at = None
         self._monotonic = time.monotonic
+        self._stop_event = threading.Event()
 
         # Ensure directories exist
         config.RADARR_WATCH_DIR.mkdir(parents=True, exist_ok=True)
@@ -72,8 +74,94 @@ class TorBoxWatcherApp:
             logger.info(f"Running in single directory mode")
             logger.info(f"Watching directory: {config.RADARR_WATCH_DIR}")
             logger.info(f"Download directory: {config.RADARR_DOWNLOAD_DIR}")
-        
-        logger.info(f"Progress updates every {config.PROGRESS_INTERVAL} seconds")
+
+        logger.info(f"Local transfer progress updates every {config.PROGRESS_INTERVAL} seconds")
+        logger.info(
+            "Remote TorBox status polling every %s seconds while downloads are tracked",
+            self._get_status_check_interval(),
+        )
+
+    @property
+    def stop_requested(self):
+        """Returns whether shutdown has been requested."""
+        return self._stop_event.is_set()
+
+    def request_stop(self):
+        """Requests a graceful shutdown of the watcher loop."""
+        self._stop_event.set()
+
+    def shutdown(self):
+        """Signals any active progress or extraction threads to stop."""
+        self.file_processor.stop_active_operations(self.active_downloads)
+
+    def _wait_for_stop(self, timeout):
+        """
+        Waits for shutdown to be requested.
+
+        Args:
+            timeout (int | float): Maximum number of seconds to wait.
+
+        Returns:
+            bool: ``True`` if shutdown was requested during the wait, otherwise ``False``.
+        """
+        return self._stop_event.wait(timeout)
+
+    def _get_status_check_interval(self):
+        """
+        Returns the effective remote status polling interval.
+
+        The watcher polls often enough to surface progress during the wait window
+        between directory scans, using the shorter positive value from
+        ``CHECK_INTERVAL`` and ``PROGRESS_INTERVAL``.
+
+        Returns:
+            int | float: Polling interval in seconds.
+        """
+        intervals = [
+            value
+            for value in (self.config.CHECK_INTERVAL, self.config.PROGRESS_INTERVAL)
+            if value is not None and value > 0
+        ]
+        if intervals:
+            return min(intervals)
+        if self.config.WATCH_INTERVAL and self.config.WATCH_INTERVAL > 0:
+            return self.config.WATCH_INTERVAL
+        return 1
+
+    def _wait_until_next_scan(self):
+        """
+        Waits until the next scan deadline, running status checks during the wait.
+
+        Returns:
+            bool: ``True`` if shutdown was requested, otherwise ``False``.
+        """
+        if not self.download_tracker.get_tracked_downloads():
+            return self._wait_for_stop(self.config.WATCH_INTERVAL)
+
+        deadline = self._monotonic() + self.config.WATCH_INTERVAL
+        while not self.stop_requested:
+            remaining = deadline - self._monotonic()
+            if remaining <= 0:
+                return False
+
+            has_tracked_downloads = bool(self.download_tracker.get_tracked_downloads())
+            wait_seconds = remaining
+            if has_tracked_downloads:
+                wait_seconds = min(wait_seconds, self._get_status_check_interval())
+
+            if self._wait_for_stop(wait_seconds):
+                return True
+
+            if self._monotonic() >= deadline:
+                return False
+
+            if has_tracked_downloads:
+                self._run_scheduled_status_check()
+                if self.stop_requested:
+                    return True
+                self.cleanup_stale_downloads()
+
+        return True
 
     def _build_drop_event(self, identifier, tracking_info, reason, details=None):
         """
@@ -206,7 +294,7 @@ class TorBoxWatcherApp:
         current_time = self._monotonic() if now is None else now
         return (
             self.last_status_check_at is None
-            or (current_time - self.last_status_check_at) >= self.config.CHECK_INTERVAL
+            or (current_time - self.last_status_check_at) >= self._get_status_check_interval()
         )
 
     def _run_scheduled_status_check(self, now=None):
@@ -392,7 +480,7 @@ class TorBoxWatcherApp:
         """
         for key in ("queued_id", "queue_id", "id"):
             if item.get(key) is not None:
-                return item.get(key)
+                return str(item.get(key))
         return None
 
     def _extract_active_download_id(self, item, download_type, allow_generic_id=True):
@@ -403,14 +491,14 @@ class TorBoxWatcherApp:
         if download_type == "torrent":
             keys.extend(["torrent_id", "download_id"])
         else:
-            keys.extend(["usenetdownload_id", "usenet_id", "download_id"])
+            keys.extend(["usenetdownload_id", "usenet_id"])
 
         if allow_generic_id:
             keys.append("id")
 
         for key in keys:
             if item.get(key) is not None:
-                return item.get(key)
+                return str(item.get(key))
         return None
 
     def _find_queued_item(self, response_data, queued_id):
@@ -950,20 +1038,35 @@ class TorBoxWatcherApp:
         and sleeps for a configured interval.
         """
         logger.info("Starting TorBox Watcher")
-        while True:
-            try:
-                self.scan_watch_directory()
-                self._run_scheduled_status_check()
-                self.cleanup_stale_downloads()
-                
-                logger.info(
-                    f"Waiting {self.config.WATCH_INTERVAL} seconds until next scan"
-                )
-                time.sleep(self.config.WATCH_INTERVAL)
+        try:
+            while not self.stop_requested:
+                try:
+                    self.scan_watch_directory()
+                    if self.stop_requested:
+                        break
 
-            except KeyboardInterrupt:
-                logger.info("Received keyboard interrupt. Shutting down...")
-                break
-            except Exception as e:
-                logger.error(f"Unexpected error in main loop: {e}")
-                time.sleep(5)  # Wait before next loop in case of error
+                    self._run_scheduled_status_check()
+                    if self.stop_requested:
+                        break
+
+                    self.cleanup_stale_downloads()
+                    if self.stop_requested:
+                        break
+
+                    logger.info(
+                        f"Waiting {self.config.WATCH_INTERVAL} seconds until next scan"
+                    )
+                    if self._wait_until_next_scan():
+                        logger.info("Shutdown requested. Exiting main loop.")
+                        break
+
+                except KeyboardInterrupt:
+                    logger.info("Received keyboard interrupt. Shutting down...")
+                    self.request_stop()
+                except Exception as e:
+                    logger.error(f"Unexpected error in main loop: {e}")
+                    if self._wait_for_stop(5):
+                        logger.info("Shutdown requested during error backoff. Exiting main loop.")
+                        break
+        finally:
+            self.shutdown()

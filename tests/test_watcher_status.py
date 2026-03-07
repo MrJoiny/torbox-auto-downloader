@@ -108,6 +108,49 @@ def test_response_item_helpers_cover_queued_and_active_lookups(watcher_app):
     )
 
 
+def test_usenet_active_id_extraction_ignores_provider_download_id(watcher_app):
+    item = {
+        "id": 945176,
+        "download_id": "SABnzbd_nzo_g3tb9ywy",
+        "hash": "hash-usenet",
+    }
+
+    assert watcher_app._extract_active_download_id(item, "usenet") == "945176"
+
+
+def test_check_usenet_status_keeps_torbox_integer_id_when_provider_download_id_is_present(
+    watcher_app,
+    track_download,
+):
+    identifier = track_download(
+        watcher_app,
+        identifier="usenet:id:945176",
+        download_type="usenet",
+        download_id="945176",
+        download_hash="hash-usenet",
+    )
+    queries = []
+    watcher_app.api_client.get_usenet_list = lambda query_param=None: queries.append(query_param) or {
+        "data": {
+            "id": 945176,
+            "download_id": "SABnzbd_nzo_g3tb9ywy",
+            "hash": "hash-usenet",
+            "download_state": "downloading",
+            "progress": 0.5,
+            "size": 123,
+            "download_present": False,
+        }
+    }
+
+    assert watcher_app._check_active_status(
+        identifier,
+        watcher_app.download_tracker.get_download_info(identifier),
+        "usenet",
+    ) is False
+    assert queries == ["id=945176"]
+    assert watcher_app.download_tracker.get_download_info(identifier)["id"] == "945176"
+
+
 def test_check_download_status_keeps_queued_item_queued_when_no_active_id_assigned(
     watcher_app,
     track_download,

@@ -1,0 +1,84 @@
+name: bump-version
+
+on:
+  workflow_dispatch:
+    inputs:
+      part:
+        description: Semantic version part to bump
+        required: true
+        default: patch
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+
+permissions:
+  contents: write
+
+jobs:
+  bump-version:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Bump version.py
+        id: bump
+        shell: bash
+        run: |
+          export BUMP_PART="${{ github.event.inputs.part }}"
+          python - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          version_file = Path("version.py")
+          content = version_file.read_text(encoding="utf-8")
+          match = re.search(r'__version__\s*=\s*"(\d+)\.(\d+)\.(\d+)"', content)
+          if not match:
+              raise SystemExit("Could not find __version__ in version.py")
+
+          major, minor, patch = map(int, match.groups())
+          part = os.environ["BUMP_PART"]
+
+          if part == "major":
+              major += 1
+              minor = 0
+              patch = 0
+          elif part == "minor":
+              minor += 1
+              patch = 0
+          elif part == "patch":
+              patch += 1
+          else:
+              raise SystemExit(f"Unsupported bump part: {part}")
+
+          new_version = f"{major}.{minor}.{patch}"
+          updated = re.sub(
+              r'(__version__\s*=\s*")(\d+\.\d+\.\d+)(")',
+              rf"\g<1>{new_version}\g<3>",
+              content,
+              count=1,
+          )
+          version_file.write_text(updated, encoding="utf-8")
+
+          github_output = Path(os.environ["GITHUB_OUTPUT"])
+          github_output.write_text(f"new_version={new_version}\n", encoding="utf-8")
+          PY
+
+      - name: Commit version bump
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add version.py
+          git commit -m "Bump version to ${{ steps.bump.outputs.new_version }}"
+
+      - name: Push version bump
+        run: git push origin HEAD:${{ github.ref_name }}

@@ -236,6 +236,17 @@ class FileProcessor:
         self.active_extract_stats = {}  # Track active extractions
         self.session = requests.Session()  # Reuse connections for better performance
 
+    def stop_active_operations(self, active_downloads):
+        """
+        Signals all active download and extraction stats loops to stop.
+
+        Args:
+            active_downloads (dict): Active download/extraction stats keyed by identifier.
+        """
+        for stats in list(active_downloads.values()):
+            if hasattr(stats, "should_stop"):
+                stats.should_stop = True
+
     def download_file(
         self,
         download_url,

@@ -114,36 +114,288 @@ class TorBoxWatcherApp:
                     except Exception as e:
                         logger.error(f"Error deleting file {file_path}: {e}")
 
-    def _extract_identifier_from_response(self, response_data, download_type):
+    def _make_tracker_key(self, download_type, queued_id=None, download_id=None, download_hash=None):
         """
-        Extracts download ID and hash from API response.
+        Creates a stable local tracker key for a download.
+
+        Args:
+            download_type (str): Either "torrent" or "usenet".
+            queued_id (str, optional): Queued download ID.
+            download_id (str, optional): Active download ID.
+            download_hash (str, optional): Download hash.
+
+        Returns:
+            str | None: Stable local tracker key, or None if no identifying data exists.
+        """
+        if queued_id is not None:
+            return f"{download_type}:queued:{queued_id}"
+        if download_id is not None:
+            return f"{download_type}:id:{download_id}"
+        if download_hash:
+            return f"{download_type}:hash:{download_hash}"
+        return None
+
+    def _extract_tracking_reference(self, response_data, download_type):
+        """
+        Extracts tracking reference information from an API response.
 
         Args:
             response_data (dict): API response data.
             download_type (str): Either "torrent" or "usenet".
 
         Returns:
-            tuple: (identifier, download_id, download_hash)
+            dict | None: Tracking reference details, or None if no identifying data exists.
         """
+        data = response_data.get("data")
+        if not isinstance(data, dict):
+            return None
+
         download_id = None
+        queued_id = data.get("queued_id")
         download_hash = None
-        
-        if "data" in response_data and isinstance(response_data["data"], dict):
+        if download_type == "torrent":
+            download_id = data.get("torrent_id", data.get("id"))
+        else:  # usenet
+            download_id = data.get("usenetdownload_id", data.get("id"))
+        download_hash = data.get("hash")
+
+        state = "queued" if queued_id is not None and download_id is None else "active"
+        identifier = self._make_tracker_key(
+            download_type,
+            queued_id=queued_id if state == "queued" else None,
+            download_id=download_id,
+            download_hash=download_hash,
+        )
+        if not identifier:
+            return None
+
+        return {
+            "identifier": identifier,
+            "state": state,
+            "download_type": download_type,
+            "queued_id": queued_id,
+            "download_id": download_id,
+            "download_hash": download_hash,
+        }
+
+    def _extract_items_from_response(self, response_data):
+        """
+        Normalizes API response payloads to a list of items.
+
+        Args:
+            response_data (dict): API response data.
+
+        Returns:
+            list: Response items.
+        """
+        data = response_data.get("data")
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict):
+            return [data]
+        return []
+
+    def _extract_queued_item_id(self, item):
+        """
+        Extracts a queued item ID from queue responses.
+        """
+        for key in ("queued_id", "queue_id", "id"):
+            if item.get(key) is not None:
+                return item.get(key)
+        return None
+
+    def _extract_active_download_id(self, item, download_type, allow_generic_id=True):
+        """
+        Extracts an active download ID from list or queue responses.
+        """
+        keys = []
+        if download_type == "torrent":
+            keys.extend(["torrent_id", "download_id"])
+        else:
+            keys.extend(["usenetdownload_id", "usenet_id", "download_id"])
+
+        if allow_generic_id:
+            keys.append("id")
+
+        for key in keys:
+            if item.get(key) is not None:
+                return item.get(key)
+        return None
+
+    def _find_queued_item(self, response_data, queued_id):
+        """
+        Finds a specific queued item in a queue response.
+        """
+        for item in self._extract_items_from_response(response_data):
+            if str(self._extract_queued_item_id(item)) == str(queued_id):
+                return item
+        return None
+
+    def _find_active_download_data(self, response_data, tracking_info, download_type):
+        """
+        Finds a matching active download item from list responses.
+        """
+        for item in self._extract_items_from_response(response_data):
+            item_id = self._extract_active_download_id(item, download_type, allow_generic_id=True)
+            item_hash = item.get("hash")
+
+            if tracking_info.get("id") is not None and str(item_id) == str(tracking_info.get("id")):
+                return item
+
+            if tracking_info.get("hash") and item_hash == tracking_info.get("hash"):
+                return item
+
+        return None
+
+    def _sync_tracking_from_active_item(self, identifier, tracking_info, download_data, download_type):
+        """
+        Syncs tracker metadata from an active download item.
+        """
+        download_id = self._extract_active_download_id(
+            download_data,
+            download_type,
+            allow_generic_id=True,
+        )
+        download_hash = download_data.get("hash") or tracking_info.get("hash")
+        self.download_tracker.update_tracking_reference(
+            identifier,
+            state="active",
+            download_id=download_id,
+            download_hash=download_hash,
+        )
+
+    def _get_active_status_data(self, identifier, tracking_info, download_type):
+        """
+        Retrieves active download status data for a tracked download.
+        """
+        query_param = None
+        query_description = "unfiltered list lookup"
+        if tracking_info.get("id") is not None:
+            query_param = f"id={tracking_info['id']}"
+            query_description = query_param
+        elif tracking_info.get("hash"):
+            query_description = f"hash={tracking_info['hash']} via unfiltered list lookup"
+        else:
+            logger.warning(
+                f"No active ID or hash available for {download_type} identifier {identifier}."
+            )
+            return None, query_description
+
+        logger.debug(f"Checking {download_type} status using query: {query_description}")
+        if download_type == "torrent":
+            status_data = self.api_client.get_torrent_list(query_param)
+        else:
+            status_data = self.api_client.get_usenet_list(query_param)
+
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(f"{download_type.capitalize()} status response: {json.dumps(status_data)}")
+
+        download_data = self._find_active_download_data(status_data, tracking_info, download_type)
+        return download_data, query_description
+
+    def _check_queued_status(self, identifier, tracking_info, download_type):
+        """
+        Checks the status of a queued download and promotes it to active once TorBox assigns an active ID.
+        """
+        queued_id = tracking_info.get("queued_id")
+        if queued_id is None:
+            logger.warning(
+                f"No queued ID found for queued {download_type} identifier: {identifier}. Falling back to active lookup."
+            )
+            return self._check_active_status(identifier, tracking_info, download_type)
+
+        logger.debug(f"Checking queued {download_type} status using queued_id={queued_id}")
+        status_data = self.api_client.get_queued_list(download_type, queued_id=queued_id)
+
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(f"Queued {download_type} status response: {json.dumps(status_data)}")
+
+        queue_item = self._find_queued_item(status_data, queued_id)
+        if not queue_item:
+            logger.info(
+                f"Queued {download_type} item {queued_id} not found in queue response. Checking active list."
+            )
+            return self._check_active_status(identifier, tracking_info, download_type)
+
+        active_id = self._extract_active_download_id(
+            queue_item,
+            download_type,
+            allow_generic_id=False,
+        )
+        download_hash = queue_item.get("hash") or tracking_info.get("hash")
+        if active_id is not None:
+            self.download_tracker.update_tracking_reference(
+                identifier,
+                state="active",
+                queued_id=queued_id,
+                download_id=active_id,
+                download_hash=download_hash,
+            )
+            logger.info(
+                f"{download_type.capitalize()} [{identifier}] promoted from queued ID {queued_id} to active ID {active_id}"
+            )
+            refreshed_tracking_info = self.download_tracker.get_download_info(identifier) or tracking_info
+            return self._check_active_status(identifier, refreshed_tracking_info, download_type)
+
+        queue_state = queue_item.get("download_state") or queue_item.get("state") or queue_item.get("status") or "queued"
+        logger.info(
+            f"{download_type.capitalize()} [{identifier}]: {tracking_info['name']} | "
+            f"Queue Status: {str(queue_state).upper()} | Queued ID: {queued_id}"
+        )
+        return False
+
+    def _check_active_status(self, identifier, tracking_info, download_type):
+        """
+        Checks the status of an active download.
+        """
+        download_data, query_description = self._get_active_status_data(
+            identifier,
+            tracking_info,
+            download_type,
+        )
+        if not download_data:
+            logger.warning(
+                f"Could not find {download_type} with identifier {identifier} using {query_description}."
+            )
+            return False
+
+        self._sync_tracking_from_active_item(identifier, tracking_info, download_data, download_type)
+        tracking_info = self.download_tracker.get_download_info(identifier) or tracking_info
+
+        download_state = download_data.get("download_state", "")
+        progress = download_data.get("progress", 0)
+        progress_percentage = float(progress) * 100
+        size_formatted = download_data.get("size", 0)
+
+        logger.info(
+            f"{download_type.capitalize()} [{identifier}]: {tracking_info['name']} | "
+            f"Status: {download_state.upper()} | Progress: {progress_percentage:.1f}% | Size: {size_formatted}"
+        )
+
+        if download_data.get("download_present", False):
+            files = download_data.get("files", [])
+
+            if files and len(files) > 0:
+                download_name = download_data.get("name", tracking_info["name"])
+
+                if len(files) == 1:
+                    actual_filename = files[0].get("short_name") or files[0].get("name", "")
+                    if actual_filename:
+                        actual_filename = Path(actual_filename).name
+                        logger.info(f"Single file detected: {actual_filename}")
+                        self.download_tracker.update_filename(identifier, actual_filename, is_multi_file=False)
+                else:
+                    logger.info(f"Multiple files detected ({len(files)} files) - forcing ZIP download")
+                    actual_filename = f"{download_name}.zip"
+                    self.download_tracker.update_filename(identifier, actual_filename, is_multi_file=True)
+
             if download_type == "torrent":
-                if "torrent_id" in response_data["data"]:
-                    download_id = response_data["data"]["torrent_id"]
-                if "hash" in response_data["data"]:
-                    download_hash = response_data["data"]["hash"]
-            else:  # usenet
-                if "usenetdownload_id" in response_data["data"]:
-                    download_id = response_data["data"]["usenetdownload_id"]
-                elif "id" in response_data["data"]:
-                    download_id = response_data["data"]["id"]
-                if "hash" in response_data["data"]:
-                    download_hash = response_data["data"]["hash"]
-        
-        identifier = download_id if download_id else download_hash
-        return identifier, download_id, download_hash
+                self.request_torrent_download(identifier)
+            else:
+                self.request_usenet_download(identifier)
+            return True
+
+        return False
 
     def process_torrent_file(self, file_path: Path, download_dir: Path):
         """
@@ -177,20 +429,24 @@ class TorBoxWatcherApp:
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug(f"Torrent API response: {json.dumps(response_data)}")
 
-            identifier, download_id, download_hash = self._extract_identifier_from_response(
-                response_data, "torrent"
-            )
+            tracking_reference = self._extract_tracking_reference(response_data, "torrent")
 
-            if identifier:
-                logger.info(f"Successfully submitted torrent: {file_name}, ID: {identifier}")
+            if tracking_reference:
+                identifier = tracking_reference["identifier"]
+                logger.info(
+                    f"Successfully submitted torrent: {file_name}, tracker key: {identifier}, "
+                    f"state: {tracking_reference['state']}"
+                )
                 success = self.download_tracker.track_download(
                     identifier=identifier,
                     download_type="torrent",
                     file_stem=file_path.stem,
                     original_file=file_path,
-                    download_id=download_id,
-                    download_hash=download_hash,
-                    download_dir=download_dir
+                    download_id=tracking_reference["download_id"],
+                    queued_id=tracking_reference["queued_id"],
+                    download_hash=tracking_reference["download_hash"],
+                    download_dir=download_dir,
+                    state=tracking_reference["state"],
                 )
                 return success, file_path, identifier
             else:
@@ -219,84 +475,14 @@ class TorBoxWatcherApp:
             logger.warning(f"No tracking info found for {download_type} identifier: {identifier}")
             return False
 
-        # Prefer the specific API 'id' if stored, otherwise use the identifier
-        query_id = tracking_info.get("id") or identifier
-        query_param = f"id={query_id}"
-
         try:
-            logger.debug(f"Checking {download_type} status using query: {query_param}")
-            
-            # Call appropriate API method
-            if download_type == "torrent":
-                status_data = self.api_client.get_torrent_list(query_param)
-            else:  # usenet
-                status_data = self.api_client.get_usenet_list(query_param)
-            
-            if logger.isEnabledFor(logging.DEBUG):
-                logger.debug(f"{download_type.capitalize()} status response: {json.dumps(status_data)}")
-
-            # Reset failure count on successful API call
-            self.download_tracker.reset_failure_count(identifier)
-
-            # Extract download data from response
-            download_data = None
-            if "data" in status_data:
-                if isinstance(status_data["data"], dict):
-                    download_data = status_data["data"]
-                elif isinstance(status_data["data"], list) and len(status_data["data"]) > 0:
-                    # Find the correct item in the list
-                    for item in status_data["data"]:
-                        api_id_match = tracking_info.get("id") and str(item.get("id", "")) == str(tracking_info.get("id"))
-                        hash_match = tracking_info.get("hash") and item.get("hash") == tracking_info.get("hash")
-                        identifier_hash_match = not tracking_info.get("id") and item.get("hash") == identifier
-
-                        if api_id_match or hash_match or identifier_hash_match:
-                            download_data = item
-                            break
-
-            if download_data:
-                download_state = download_data.get("download_state", "")
-                progress = download_data.get("progress", 0)
-                progress_percentage = float(progress) * 100
-                size_formatted = download_data.get("size", 0)
-
-                logger.info(
-                    f"{download_type.capitalize()} [{identifier}]: {tracking_info['name']} | "
-                    f"Status: {download_state.upper()} | Progress: {progress_percentage:.1f}% | Size: {size_formatted}"
-                )
-
-                # Check if download is ready
-                if download_data.get("download_present", False):
-                    # Determine the appropriate filename based on file count
-                    files = download_data.get("files", [])
-                    
-                    if files and len(files) > 0:
-                        # Get torrent/download name from API
-                        download_name = download_data.get("name", tracking_info["name"])
-                        
-                        if len(files) == 1:
-                            # Single file: use the actual filename with extension
-                            actual_filename = files[0].get("short_name") or files[0].get("name", "")
-                            if actual_filename:
-                                # If it's a path (e.g., "folder/file.mkv"), get just the filename
-                                actual_filename = Path(actual_filename).name
-                                logger.info(f"Single file detected: {actual_filename}")
-                                self.download_tracker.update_filename(identifier, actual_filename, is_multi_file=False)
-                        else:
-                            # Multiple files: force ZIP download
-                            logger.info(f"Multiple files detected ({len(files)} files) - forcing ZIP download")
-                            actual_filename = f"{download_name}.zip"
-                            self.download_tracker.update_filename(identifier, actual_filename, is_multi_file=True)
-                    
-                    if download_type == "torrent":
-                        self.request_torrent_download(identifier)
-                    else:  # usenet
-                        self.request_usenet_download(identifier)
-                    return True
+            if tracking_info.get("state") == "queued":
+                result = self._check_queued_status(identifier, tracking_info, download_type)
             else:
-                logger.warning(
-                    f"Could not find {download_type} with identifier {identifier} (query_id: {query_id}) in status response."
-                )
+                result = self._check_active_status(identifier, tracking_info, download_type)
+
+            self.download_tracker.reset_failure_count(identifier)
+            return result
 
         except Exception as e:
             logger.error(f"Error checking {download_type} status for identifier {identifier}: {e}")
@@ -337,8 +523,33 @@ class TorBoxWatcherApp:
             )
             return
 
-        # Prefer the specific API 'id' if stored, otherwise use the identifier
-        request_id = tracking_info.get("id") or identifier
+        if tracking_info.get("state") == "queued":
+            logger.info(
+                f"Skipping download request for queued {download_type} identifier {identifier} until TorBox assigns an active ID."
+            )
+            return
+
+        request_id = tracking_info.get("id")
+        if request_id is None:
+            logger.info(
+                f"Resolving active ID for {download_type} identifier {identifier} before requesting download."
+            )
+            download_data, _ = self._get_active_status_data(identifier, tracking_info, download_type)
+            if download_data:
+                self._sync_tracking_from_active_item(
+                    identifier,
+                    tracking_info,
+                    download_data,
+                    download_type,
+                )
+            refreshed_tracking_info = self.download_tracker.get_download_info(identifier) or tracking_info
+            request_id = refreshed_tracking_info.get("id")
+            tracking_info = refreshed_tracking_info
+            if request_id is None:
+                logger.warning(
+                    f"Unable to resolve active ID for {download_type} identifier {identifier}. Skipping download request."
+                )
+                return
         
         # Get the download directory from tracking info
         download_dir = Path(tracking_info.get("download_dir")) if tracking_info.get("download_dir") else None
@@ -424,20 +635,24 @@ class TorBoxWatcherApp:
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug(f"Usenet API response: {json.dumps(response_data)}")
 
-            identifier, download_id, download_hash = self._extract_identifier_from_response(
-                response_data, "usenet"
-            )
+            tracking_reference = self._extract_tracking_reference(response_data, "usenet")
 
-            if identifier:
-                logger.info(f"Successfully submitted NZB: {file_name}, ID: {identifier}")
+            if tracking_reference:
+                identifier = tracking_reference["identifier"]
+                logger.info(
+                    f"Successfully submitted NZB: {file_name}, tracker key: {identifier}, "
+                    f"state: {tracking_reference['state']}"
+                )
                 success = self.download_tracker.track_download(
                     identifier=identifier,
                     download_type="usenet",
                     file_stem=file_path.stem,
                     original_file=file_path,
-                    download_id=download_id,
-                    download_hash=download_hash,
-                    download_dir=download_dir
+                    download_id=tracking_reference["download_id"],
+                    queued_id=tracking_reference["queued_id"],
+                    download_hash=tracking_reference["download_hash"],
+                    download_dir=download_dir,
+                    state=tracking_reference["state"],
                 )
                 return success, file_path, identifier
             else:

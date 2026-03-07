@@ -22,9 +22,11 @@ class DownloadTracker:
         file_stem,
         original_file=None, # Made optional
         download_id=None,
+        queued_id=None,
         download_hash=None,
         download_dir=None,
         is_multi_file=False,
+        state="active",
     ):
         """
         Tracks a new download. Uses the provided identifier as the primary key.
@@ -36,9 +38,11 @@ class DownloadTracker:
             file_stem (str): The name for the download (e.g., original file name without ext).
             original_file (str, optional): The path to the original file, if applicable. Defaults to None.
             download_id (str, optional): The download ID from the API (e.g., torrent_id). Defaults to None.
+            queued_id (str, optional): The queued download ID from the API. Defaults to None.
             download_hash (str, optional): The download hash from the API. Defaults to None.
             download_dir (Path, optional): The destination directory for this download. Defaults to None.
             is_multi_file (bool, optional): Whether this download contains multiple files. Defaults to False.
+            state (str, optional): Tracking state ("queued" or "active"). Defaults to "active".
 
         Returns:
             bool: True if tracking was successfully initiated, False if already tracked.
@@ -52,7 +56,9 @@ class DownloadTracker:
             "name": file_stem,
             "submitted_at": datetime.now().isoformat(),
             "original_file": str(original_file) if original_file else None,
+            "state": state,
             "id": download_id, # Store the specific API ID if provided
+            "queued_id": queued_id, # Store queued API ID if provided
             "hash": download_hash, # Store the hash if provided
             "download_dir": str(download_dir) if download_dir else None,
             "failure_count": 0,  # Track consecutive failures
@@ -61,6 +67,54 @@ class DownloadTracker:
         logger.info(
             f"Tracking new {download_type} download: Identifier: {identifier}, Name: {file_stem}, Dest: {download_dir}"
         )
+        return True
+
+    def update_tracking_reference(
+        self,
+        identifier,
+        state=None,
+        queued_id=None,
+        download_id=None,
+        download_hash=None,
+    ):
+        """
+        Updates the tracking reference for an existing download without changing its tracker key.
+
+        Args:
+            identifier (str): The stable tracker key for the download.
+            state (str, optional): Updated tracking state.
+            queued_id (str, optional): Updated queued ID.
+            download_id (str, optional): Updated active download ID.
+            download_hash (str, optional): Updated download hash.
+
+        Returns:
+            bool: True if the entry was updated, False if the download is unknown.
+        """
+        tracking_info = self.download_tracking.get(str(identifier))
+        if not tracking_info:
+            logger.warning(f"Cannot update tracking reference for unknown identifier: {identifier}")
+            return False
+
+        changes = []
+        if state and tracking_info.get("state") != state:
+            changes.append(f"state {tracking_info.get('state')} -> {state}")
+            tracking_info["state"] = state
+
+        if queued_id is not None and tracking_info.get("queued_id") != queued_id:
+            changes.append(f"queued_id {tracking_info.get('queued_id')} -> {queued_id}")
+            tracking_info["queued_id"] = queued_id
+
+        if download_id is not None and tracking_info.get("id") != download_id:
+            changes.append(f"id {tracking_info.get('id')} -> {download_id}")
+            tracking_info["id"] = download_id
+
+        if download_hash and tracking_info.get("hash") != download_hash:
+            changes.append("hash updated")
+            tracking_info["hash"] = download_hash
+
+        if changes:
+            logger.info(f"Updated tracking reference for {identifier}: {', '.join(changes)}")
+
         return True
 
     def increment_failure_count(self, identifier):

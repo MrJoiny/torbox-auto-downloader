@@ -34,6 +34,7 @@ class DownloadTracker:
         original_file=None,
         download_id=None,
         queued_id=None,
+        queue_auth_id=None,
         download_hash=None,
         download_dir=None,
         is_multi_file=False,
@@ -49,6 +50,7 @@ class DownloadTracker:
             original_file (str | Path, optional): Source file path if one exists.
             download_id (str, optional): Active TorBox download ID.
             queued_id (str, optional): TorBox queued item ID.
+            queue_auth_id (str, optional): Queue-derived auth bridge used for queued usenet promotion.
             download_hash (str, optional): TorBox download hash.
             download_dir (str | Path, optional): Destination directory for the local download.
             is_multi_file (bool, optional): Whether the download should be treated as multi-file.
@@ -71,6 +73,7 @@ class DownloadTracker:
             "state": state,
             "id": download_id,
             "queued_id": queued_id,
+            "queue_auth_id": queue_auth_id,
             "hash": download_hash,
             "download_dir": str(download_dir) if download_dir else None,
             "failure_counts": {reason: 0 for reason in FAILURE_COUNT_REASONS},
@@ -90,6 +93,7 @@ class DownloadTracker:
         identifier,
         state=None,
         queued_id=None,
+        queue_auth_id=None,
         download_id=None,
         download_hash=None,
     ):
@@ -100,6 +104,7 @@ class DownloadTracker:
             identifier (str): Stable local identifier for the tracked item.
             state (str, optional): Updated tracker state.
             queued_id (str, optional): Updated queued item ID.
+            queue_auth_id (str, optional): Updated queue-derived auth bridge for queued usenet items.
             download_id (str, optional): Updated active download ID.
             download_hash (str, optional): Updated download hash.
 
@@ -119,6 +124,10 @@ class DownloadTracker:
         if queued_id is not None and tracking_info.get("queued_id") != queued_id:
             changes.append(f"queued_id {tracking_info.get('queued_id')} -> {queued_id}")
             tracking_info["queued_id"] = queued_id
+
+        if queue_auth_id is not None and tracking_info.get("queue_auth_id") != queue_auth_id:
+            changes.append("queue_auth_id updated")
+            tracking_info["queue_auth_id"] = queue_auth_id
 
         if download_id is not None and tracking_info.get("id") != download_id:
             changes.append(f"id {tracking_info.get('id')} -> {download_id}")

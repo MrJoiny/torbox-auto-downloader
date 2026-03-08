@@ -18,6 +18,7 @@ def test_track_download_stores_metadata_and_rejects_duplicates(tracker):
         original_file="release.torrent",
         download_id="1",
         queued_id="q1",
+        queue_auth_id="auth-q1",
         download_hash="hash1",
         download_dir="/downloads",
         is_multi_file=True,
@@ -30,6 +31,7 @@ def test_track_download_stores_metadata_and_rejects_duplicates(tracker):
     assert info["original_file"] == "release.torrent"
     assert info["id"] == "1"
     assert info["queued_id"] == "q1"
+    assert info["queue_auth_id"] == "auth-q1"
     assert info["hash"] == "hash1"
     assert info["download_dir"] == "/downloads"
     assert info["is_multi_file"] is True
@@ -53,6 +55,7 @@ def test_update_tracking_reference_updates_known_identifier_only(tracker):
         "torrent:id:1",
         state="queued",
         queued_id="q1",
+        queue_auth_id="auth-q1",
         download_id="2",
         download_hash="hash2",
     )
@@ -61,6 +64,7 @@ def test_update_tracking_reference_updates_known_identifier_only(tracker):
     info = tracker.get_download_info("torrent:id:1")
     assert info["state"] == "queued"
     assert info["queued_id"] == "q1"
+    assert info["queue_auth_id"] == "auth-q1"
     assert info["id"] == "2"
     assert info["hash"] == "hash2"
 

@@ -5,6 +5,7 @@ from pathlib import Path
 import json
 import os
 from datetime import datetime, timezone
+from urllib.parse import urlsplit
 
 from config import Config
 from api_client import TorBoxAPIClient
@@ -184,6 +185,7 @@ class TorBoxWatcherApp:
             "name": tracking_info.get("name"),
             "state": tracking_info.get("state"),
             "queued_id": tracking_info.get("queued_id"),
+            "queue_auth_id": tracking_info.get("queue_auth_id"),
             "download_id": tracking_info.get("id"),
             "download_hash": tracking_info.get("hash"),
             "download_dir": tracking_info.get("download_dir"),
@@ -453,6 +455,7 @@ class TorBoxWatcherApp:
             "state": state,
             "download_type": download_type,
             "queued_id": queued_id,
+            "queue_auth_id": data.get("auth_id"),
             "download_id": download_id,
             "download_hash": download_hash,
         }
@@ -473,6 +476,57 @@ class TorBoxWatcherApp:
         if isinstance(data, dict):
             return [data]
         return []
+
+    def _summarize_response_for_log(self, response_data, download_type):
+        """
+        Builds a compact, log-friendly summary of an API response.
+        """
+        items = []
+        for item in self._extract_items_from_response(response_data):
+            summary = {
+                "id": self._extract_active_download_id(item, download_type, allow_generic_id=True),
+                "queued_id": self._extract_queued_item_id(item),
+                "auth_id": item.get("auth_id") or self._extract_queue_auth_id(item, download_type),
+                "hash": item.get("hash"),
+                "name": item.get("name_override") or item.get("name"),
+                "state": item.get("download_state") or item.get("state") or item.get("status"),
+                "progress": item.get("progress"),
+                "download_present": item.get("download_present"),
+            }
+            if isinstance(item.get("files"), list):
+                summary["file_count"] = len(item["files"])
+            items.append({key: value for key, value in summary.items() if value is not None})
+
+        payload = {
+            "success": response_data.get("success"),
+            "detail": response_data.get("detail"),
+            "error": response_data.get("error"),
+            "data_count": len(items),
+            "items": items[:3],
+        }
+        if len(items) > 3:
+            payload["items_truncated"] = len(items) - 3
+        return payload
+
+    def _summarize_download_url_for_log(self, download_url):
+        """
+        Redacts long signed download URLs for log output.
+        """
+        if not isinstance(download_url, str):
+            return "<non-string-url>"
+
+        parts = urlsplit(download_url)
+        if not parts.scheme or not parts.netloc:
+            return download_url
+
+        tail = parts.path.rsplit("/", 1)[-1] if parts.path else ""
+        if tail:
+            path_summary = f"/.../{tail}"
+        else:
+            path_summary = parts.path or ""
+
+        suffix = " (query omitted)" if parts.query else ""
+        return f"{parts.scheme}://{parts.netloc}{path_summary}{suffix}"
 
     def _extract_queued_item_id(self, item):
         """
@@ -501,6 +555,24 @@ class TorBoxWatcherApp:
                 return str(item.get(key))
         return None
 
+    def _extract_queue_auth_id(self, item, download_type):
+        """
+        Extracts the queue-to-active auth bridge from queue responses.
+        """
+        auth_id = item.get("auth_id")
+        if auth_id is not None:
+            return str(auth_id)
+
+        if download_type != "usenet":
+            return None
+
+        torrent_file = item.get("torrent_file")
+        if not torrent_file:
+            return None
+
+        auth_prefix = str(torrent_file).split("/", 1)[0]
+        return auth_prefix or None
+
     def _find_queued_item(self, response_data, queued_id):
         """
         Finds a specific queued item in a queue response.
@@ -517,8 +589,16 @@ class TorBoxWatcherApp:
         for item in self._extract_items_from_response(response_data):
             item_id = self._extract_active_download_id(item, download_type, allow_generic_id=True)
             item_hash = item.get("hash")
+            item_auth_id = item.get("auth_id")
 
             if tracking_info.get("id") is not None and str(item_id) == str(tracking_info.get("id")):
+                return item
+
+            if (
+                download_type == "usenet"
+                and tracking_info.get("queue_auth_id")
+                and str(item_auth_id) == str(tracking_info.get("queue_auth_id"))
+            ):
                 return item
 
             if tracking_info.get("hash") and item_hash == tracking_info.get("hash"):
@@ -552,11 +632,15 @@ class TorBoxWatcherApp:
         if tracking_info.get("id") is not None:
             query_param = f"id={tracking_info['id']}"
             query_description = query_param
+        elif download_type == "usenet" and tracking_info.get("queue_auth_id"):
+            query_description = (
+                f"queue_auth_id={tracking_info['queue_auth_id']} via unfiltered list lookup"
+            )
         elif tracking_info.get("hash"):
             query_description = f"hash={tracking_info['hash']} via unfiltered list lookup"
         else:
             logger.warning(
-                f"No active ID or hash available for {download_type} identifier {identifier}."
+                f"No active ID, queue auth ID, or hash available for {download_type} identifier {identifier}."
             )
             return None, query_description
 
@@ -567,7 +651,11 @@ class TorBoxWatcherApp:
             status_data = self.api_client.get_usenet_list(query_param)
 
         if logger.isEnabledFor(logging.DEBUG):
-            logger.debug(f"{download_type.capitalize()} status response: {json.dumps(status_data)}")
+            logger.debug(
+                "%s status response summary: %s",
+                download_type.capitalize(),
+                json.dumps(self._summarize_response_for_log(status_data, download_type)),
+            )
 
         download_data = self._find_active_download_data(status_data, tracking_info, download_type)
         return download_data, query_description
@@ -585,7 +673,8 @@ class TorBoxWatcherApp:
 
         logger.debug(f"Checking queued {download_type} status using queued_id={queued_id}")
         try:
-            status_data = self.api_client.get_queued_list(download_type, queued_id=queued_id)
+            queued_lookup_id = None if download_type == "usenet" else queued_id
+            status_data = self.api_client.get_queued_list(download_type, queued_id=queued_lookup_id)
         except Exception as exc:
             logger.warning(
                 "Queued %s lookup failed for %s (queued_id=%s): %s. Attempting active lookup.",
@@ -626,7 +715,11 @@ class TorBoxWatcherApp:
             return self._check_active_status(identifier, refreshed_tracking_info, download_type)
 
         if logger.isEnabledFor(logging.DEBUG):
-            logger.debug(f"Queued {download_type} status response: {json.dumps(status_data)}")
+            logger.debug(
+                "Queued %s status response summary: %s",
+                download_type,
+                json.dumps(self._summarize_response_for_log(status_data, download_type)),
+            )
 
         queue_item = self._find_queued_item(status_data, queued_id)
         if not queue_item:
@@ -637,6 +730,14 @@ class TorBoxWatcherApp:
 
         self.download_tracker.mark_activity(identifier)
         self.download_tracker.reset_failure_count(identifier, "not_found")
+
+        queue_auth_id = self._extract_queue_auth_id(queue_item, download_type)
+        if queue_auth_id and tracking_info.get("queue_auth_id") != queue_auth_id:
+            self.download_tracker.update_tracking_reference(
+                identifier,
+                queue_auth_id=queue_auth_id,
+            )
+            tracking_info = self.download_tracker.get_download_info(identifier) or tracking_info
 
         active_id = self._extract_active_download_id(
             queue_item,
@@ -649,6 +750,7 @@ class TorBoxWatcherApp:
                 identifier,
                 state="active",
                 queued_id=queued_id,
+                queue_auth_id=queue_auth_id,
                 download_id=active_id,
                 download_hash=download_hash,
             )
@@ -775,6 +877,7 @@ class TorBoxWatcherApp:
                     original_file=file_path,
                     download_id=tracking_reference["download_id"],
                     queued_id=tracking_reference["queued_id"],
+                    queue_auth_id=tracking_reference["queue_auth_id"],
                     download_hash=tracking_reference["download_hash"],
                     download_dir=download_dir,
                     state=tracking_reference["state"],
@@ -914,7 +1017,11 @@ class TorBoxWatcherApp:
             if download_link_data.get("success", False) and "data" in download_link_data:
                 download_url = download_link_data["data"]
                 logger.info(
-                    f"Got download URL for {download_type} identifier {identifier} (request_id: {request_id}): {download_url}"
+                    "Got download URL for %s identifier %s (request_id: %s): %s",
+                    download_type,
+                    identifier,
+                    request_id,
+                    self._summarize_download_url_for_log(download_url),
                 )
                 self.download_tracker.reset_failure_count(identifier, "download_link")
                 self.download_tracker.mark_activity(identifier)
@@ -1004,6 +1111,7 @@ class TorBoxWatcherApp:
                     original_file=file_path,
                     download_id=tracking_reference["download_id"],
                     queued_id=tracking_reference["queued_id"],
+                    queue_auth_id=tracking_reference["queue_auth_id"],
                     download_hash=tracking_reference["download_hash"],
                     download_dir=download_dir,
                     state=tracking_reference["state"],

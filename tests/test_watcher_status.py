@@ -33,6 +33,7 @@ def test_make_tracker_key_precedence(watcher_app, queued_id, download_id, downlo
                 "state": "active",
                 "download_type": "torrent",
                 "queued_id": None,
+                "queue_auth_id": None,
                 "download_id": "1",
                 "download_hash": "h1",
             },
@@ -45,6 +46,7 @@ def test_make_tracker_key_precedence(watcher_app, queued_id, download_id, downlo
                 "state": "queued",
                 "download_type": "torrent",
                 "queued_id": "q1",
+                "queue_auth_id": None,
                 "download_id": None,
                 "download_hash": "h1",
             },
@@ -57,7 +59,21 @@ def test_make_tracker_key_precedence(watcher_app, queued_id, download_id, downlo
                 "state": "active",
                 "download_type": "usenet",
                 "queued_id": None,
+                "queue_auth_id": None,
                 "download_id": "2",
+                "download_hash": "h2",
+            },
+        ),
+        (
+            "usenet",
+            {"data": {"queued_id": "q2", "hash": "h2", "auth_id": "auth-q2"}},
+            {
+                "identifier": "usenet:queued:q2",
+                "state": "queued",
+                "download_type": "usenet",
+                "queued_id": "q2",
+                "queue_auth_id": "auth-q2",
+                "download_id": None,
                 "download_hash": "h2",
             },
         ),
@@ -69,6 +85,7 @@ def test_make_tracker_key_precedence(watcher_app, queued_id, download_id, downlo
                 "state": "active",
                 "download_type": "torrent",
                 "queued_id": None,
+                "queue_auth_id": None,
                 "download_id": None,
                 "download_hash": "h3",
             },
@@ -85,7 +102,7 @@ def test_response_item_helpers_cover_queued_and_active_lookups(watcher_app):
     active_payload = {
         "data": [
             {"torrent_id": "1", "hash": "ha"},
-            {"id": "2", "hash": "hb"},
+            {"id": "2", "hash": "hb", "auth_id": "auth-2"},
         ]
     }
 
@@ -97,15 +114,55 @@ def test_response_item_helpers_cover_queued_and_active_lookups(watcher_app):
     assert watcher_app._extract_queued_item_id({"id": "q3"}) == "q3"
     assert watcher_app._extract_active_download_id({"torrent_id": "1"}, "torrent") == "1"
     assert watcher_app._extract_active_download_id({"usenetdownload_id": "2"}, "usenet") == "2"
+    assert watcher_app._extract_queue_auth_id({"auth_id": "auth-q1"}, "usenet") == "auth-q1"
+    assert (
+        watcher_app._extract_queue_auth_id(
+            {"torrent_file": "auth-q2/hash-q2"},
+            "usenet",
+        )
+        == "auth-q2"
+    )
     assert watcher_app._find_queued_item(list_payload, "q2") == {"queue_id": "q2"}
     assert (
         watcher_app._find_active_download_data(
             active_payload,
-            {"id": None, "hash": "hb"},
-            "torrent",
+            {"id": None, "hash": None, "queue_auth_id": "auth-2"},
+            "usenet",
         )
-        == {"id": "2", "hash": "hb"}
+        == {"id": "2", "hash": "hb", "auth_id": "auth-2"}
     )
+
+
+def test_log_summary_helpers_reduce_payload_size(watcher_app):
+    status_payload = {
+        "success": True,
+        "detail": "ok",
+        "error": None,
+        "data": [
+            {
+                "id": 945176,
+                "auth_id": "auth-q1",
+                "hash": "hash-usenet-active",
+                "name": "Release",
+                "download_state": "cached",
+                "progress": 1,
+                "download_present": True,
+                "files": [{"name": "one.mkv"}, {"name": "two.nfo"}],
+            }
+        ],
+    }
+
+    summary = watcher_app._summarize_response_for_log(status_payload, "usenet")
+
+    assert summary["data_count"] == 1
+    assert summary["items"][0]["id"] == "945176"
+    assert summary["items"][0]["file_count"] == 2
+    assert "files" not in summary["items"][0]
+
+    url_summary = watcher_app._summarize_download_url_for_log(
+        "https://example.invalid/downloads/file.zip?signature=abc123&expires=123"
+    )
+    assert url_summary == "https://example.invalid/.../file.zip (query omitted)"
 
 
 def test_usenet_active_id_extraction_ignores_provider_download_id(watcher_app):
@@ -271,6 +328,112 @@ def test_queued_lookup_exception_recovers_via_active_hash_lookup(watcher_app, tr
     assert info["failure_counts"]["status_exception"] == 0
 
 
+def test_usenet_queue_lookup_stores_queue_auth_id_and_recovers_after_queue_disappears(
+    watcher_app,
+    track_download,
+):
+    identifier = track_download(
+        watcher_app,
+        identifier="usenet:queued:q1",
+        download_type="usenet",
+        state="queued",
+        download_id=None,
+        queued_id="q1",
+        download_hash="hash-usenet-queued",
+    )
+    queue_responses = iter(
+        [
+            {
+                "data": [
+                    {
+                        "id": "q1",
+                        "torrent_file": "auth-q1/hash-usenet-queued",
+                        "download_state": "queued",
+                    }
+                ]
+            },
+            {"data": []},
+        ]
+    )
+    watcher_app.api_client.get_queued_list = lambda queue_type, queued_id=None: next(queue_responses)
+    watcher_app.api_client.get_usenet_list = lambda query_param=None: {
+        "data": [
+            {
+                "id": 945176,
+                "auth_id": "auth-q1",
+                "download_id": "SABnzbd_nzo_g3tb9ywy",
+                "hash": "hash-usenet-active",
+                "download_state": "downloading",
+                "progress": 0.5,
+                "size": 123,
+                "download_present": False,
+            }
+        ]
+    }
+
+    assert watcher_app._check_download_status_common(identifier, "usenet") is False
+    info = watcher_app.download_tracker.get_download_info(identifier)
+    assert info["state"] == "queued"
+    assert info["queue_auth_id"] == "auth-q1"
+
+    assert watcher_app._check_download_status_common(identifier, "usenet") is False
+    info = watcher_app.download_tracker.get_download_info(identifier)
+    assert info["state"] == "active"
+    assert info["id"] == "945176"
+    assert info["queue_auth_id"] == "auth-q1"
+    assert info["hash"] == "hash-usenet-active"
+
+
+def test_usenet_queued_status_uses_full_queue_list_lookup(
+    watcher_app,
+    track_download,
+):
+    identifier = track_download(
+        watcher_app,
+        identifier="usenet:queued:q1",
+        download_type="usenet",
+        state="queued",
+        download_id=None,
+        queued_id="q1",
+        download_hash="hash-usenet-queued",
+    )
+    calls = []
+    watcher_app.api_client.get_queued_list = lambda queue_type, queued_id=None: calls.append(
+        (queue_type, queued_id)
+    ) or {
+        "data": [
+            {
+                "id": "q1",
+                "torrent_file": "auth-q1/hash-usenet-queued",
+                "hash": "hash-usenet-queued",
+                "download_state": "queued",
+            }
+        ]
+    }
+    watcher_app.api_client.get_usenet_list = lambda query_param=None: {
+        "data": [
+            {
+                "id": 945176,
+                "auth_id": "auth-q1",
+                "download_id": "SABnzbd_nzo_g3tb9ywy",
+                "hash": "hash-usenet-active",
+                "download_state": "cached",
+                "progress": 1,
+                "size": 123,
+                "download_present": True,
+            }
+        ]
+    }
+
+    assert watcher_app._check_download_status_common(identifier, "usenet") is False
+    info = watcher_app.download_tracker.get_download_info(identifier)
+    assert calls == [("usenet", None)]
+    assert info["state"] == "queued"
+    assert info["queue_auth_id"] == "auth-q1"
+    assert info["id"] is None
+    assert info["hash"] == "hash-usenet-queued"
+
+
 def test_queued_lookup_exception_without_active_match_keeps_item_queued(watcher_app, track_download):
     identifier = track_download(
         watcher_app,
@@ -381,6 +544,44 @@ def test_hash_based_active_lookup_works_without_active_id(watcher_app, track_dow
     ) is False
     assert queries == [None]
     assert watcher_app.download_tracker.get_download_info(identifier)["id"] == "44"
+
+
+def test_usenet_active_lookup_uses_queue_auth_id_without_hash_or_active_id(watcher_app, track_download):
+    identifier = track_download(
+        watcher_app,
+        identifier="usenet:queued:q1",
+        download_type="usenet",
+        state="queued",
+        download_id=None,
+        queued_id="q1",
+        queue_auth_id="auth-q1",
+        download_hash=None,
+    )
+    queries = []
+    watcher_app.api_client.get_usenet_list = lambda query_param=None: queries.append(query_param) or {
+        "data": [
+            {
+                "id": 945176,
+                "auth_id": "auth-q1",
+                "download_id": "SABnzbd_nzo_g3tb9ywy",
+                "hash": "hash-usenet-active",
+                "download_state": "downloading",
+                "progress": 0.5,
+                "size": 123,
+                "download_present": False,
+            }
+        ]
+    }
+
+    assert watcher_app._check_active_status(
+        identifier,
+        watcher_app.download_tracker.get_download_info(identifier),
+        "usenet",
+    ) is False
+    assert queries == [None]
+    info = watcher_app.download_tracker.get_download_info(identifier)
+    assert info["id"] == "945176"
+    assert info["hash"] == "hash-usenet-active"
 
 
 def test_check_download_status_skips_locally_active_items_and_tolerates_disappearing_entries(

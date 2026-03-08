@@ -28,7 +28,8 @@ def test_parse_csv_env_trims_and_drops_empty_entries(load_config_module):
     ]
 
 
-def test_validate_fails_without_api_key(load_config_module):
+def test_validate_fails_without_api_key(load_config_module, monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
     config_module = load_config_module(TORBOX_API_KEY=None)
 
     with pytest.raises(ValueError):

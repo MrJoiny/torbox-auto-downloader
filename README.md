@@ -125,17 +125,6 @@ python -m pytest -q
 
 CI runs the Python test suite on Windows and Ubuntu and also performs a Docker build smoke check on Ubuntu.
 
-## Image Tags
-
-Docker tags are derived from [`version.py`](version.py). Releases publish these tags:
-
-- `<major>.<minor>.<patch>`
-- `<major>.<minor>`
-- `<major>`
-- `latest`
-
-Manual release steps are documented in [`RELEASING.md`](RELEASING.md).
-
 ## Contributor Build
 
 If you want to build the image locally from source instead of pulling from Docker Hub:

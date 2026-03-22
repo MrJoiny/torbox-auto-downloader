@@ -208,6 +208,75 @@ def test_check_usenet_status_keeps_torbox_integer_id_when_provider_download_id_i
     assert watcher_app.download_tracker.get_download_info(identifier)["id"] == "945176"
 
 
+def test_check_usenet_status_drops_remote_failed_item_and_emits_webhook(
+    watcher_app,
+    track_download,
+):
+    identifier = track_download(
+        watcher_app,
+        identifier="usenet:id:945176",
+        download_type="usenet",
+        download_id="945176",
+        download_hash="hash-usenet",
+    )
+    watcher_app.api_client.get_usenet_list = lambda query_param=None: {
+        "data": {
+            "id": 945176,
+            "download_id": "SABnzbd_nzo_g3tb9ywy",
+            "hash": "hash-usenet",
+            "download_state": "failed (Repair failed, not enough repair blocks)",
+            "progress": 1,
+            "size": 123,
+            "active": False,
+            "download_finished": True,
+            "download_present": False,
+        }
+    }
+
+    assert watcher_app._check_active_status(
+        identifier,
+        watcher_app.download_tracker.get_download_info(identifier),
+        "usenet",
+    ) is False
+    assert watcher_app.download_tracker.get_download_info(identifier) is None
+    assert watcher_app.webhook_notifier.events[-1]["reason"] == "remote_terminal_failure"
+    assert "failed" in watcher_app.webhook_notifier.events[-1]["details"].lower()
+
+
+def test_check_usenet_status_drops_finished_item_without_downloadable_file(
+    watcher_app,
+    track_download,
+):
+    identifier = track_download(
+        watcher_app,
+        identifier="usenet:id:945176",
+        download_type="usenet",
+        download_id="945176",
+        download_hash="hash-usenet",
+    )
+    watcher_app.api_client.get_usenet_list = lambda query_param=None: {
+        "data": {
+            "id": 945176,
+            "download_id": "SABnzbd_nzo_g3tb9ywy",
+            "hash": "hash-usenet",
+            "download_state": "processing",
+            "progress": 1,
+            "size": 123,
+            "download_finished": True,
+            "download_present": False,
+        }
+    }
+
+    assert watcher_app._check_active_status(
+        identifier,
+        watcher_app.download_tracker.get_download_info(identifier),
+        "usenet",
+    ) is False
+    assert watcher_app.download_tracker.get_download_info(identifier) is None
+    assert watcher_app.webhook_notifier.events[-1]["reason"] == "remote_terminal_failure"
+    assert "finished" in watcher_app.webhook_notifier.events[-1]["details"].lower()
+
+
 def test_check_download_status_keeps_queued_item_queued_when_no_active_id_assigned(
     watcher_app,
     track_download,

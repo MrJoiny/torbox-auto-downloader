@@ -283,6 +283,49 @@ class TorBoxWatcherApp:
 
         return False
 
+    def _get_remote_failure_details(self, download_data):
+        """
+        Returns a terminal-failure detail string for a remote item, if any.
+
+        Args:
+            download_data (dict): TorBox status payload for a single item.
+
+        Returns:
+            str | None: Human-readable failure detail, or None when the item
+                should remain tracked.
+        """
+        if download_data.get("download_present", False):
+            return None
+
+        download_state = str(
+            download_data.get("download_state")
+            or download_data.get("state")
+            or download_data.get("status")
+            or ""
+        ).strip()
+        normalized_state = download_state.lower()
+
+        failure_markers = (
+            "failed",
+            "error",
+            "aborted",
+            "cannot be completed",
+            "repair failed",
+            "cancelled",
+            "canceled",
+        )
+        if any(marker in normalized_state for marker in failure_markers):
+            return f"TorBox reported terminal state '{download_state}' without a downloadable file."
+
+        if download_data.get("download_finished") is True:
+            state_for_log = download_state or "unknown"
+            return (
+                "TorBox marked the item finished without a downloadable file "
+                f"(state='{state_for_log}')."
+            )
+
+        return None
+
     def _should_run_status_check(self, now=None):
         """
         Returns whether the next status-polling pass is due.
@@ -792,10 +835,20 @@ class TorBoxWatcherApp:
             )
             return False
 
-        self.download_tracker.mark_activity(identifier)
-        self.download_tracker.reset_failure_count(identifier, "not_found")
         self._sync_tracking_from_active_item(identifier, tracking_info, download_data, download_type)
         tracking_info = self.download_tracker.get_download_info(identifier) or tracking_info
+
+        failure_details = self._get_remote_failure_details(download_data)
+        if failure_details:
+            self._drop_tracked_download(
+                identifier,
+                "remote_terminal_failure",
+                details=failure_details,
+            )
+            return False
+
+        self.download_tracker.mark_activity(identifier)
+        self.download_tracker.reset_failure_count(identifier, "not_found")
 
         download_state = download_data.get("download_state", "")
         progress = download_data.get("progress", 0)

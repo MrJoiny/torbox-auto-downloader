@@ -243,7 +243,7 @@ def test_check_usenet_status_drops_remote_failed_item_and_emits_webhook(
     assert "failed" in watcher_app.webhook_notifier.events[-1]["details"].lower()
 
 
-def test_check_usenet_status_drops_finished_item_without_downloadable_file(
+def test_check_usenet_status_keeps_processing_item_without_downloadable_file(
     watcher_app,
     track_download,
 ):
@@ -272,9 +272,10 @@ def test_check_usenet_status_drops_finished_item_without_downloadable_file(
         watcher_app.download_tracker.get_download_info(identifier),
         "usenet",
     ) is False
-    assert watcher_app.download_tracker.get_download_info(identifier) is None
-    assert watcher_app.webhook_notifier.events[-1]["reason"] == "remote_terminal_failure"
-    assert "finished" in watcher_app.webhook_notifier.events[-1]["details"].lower()
+    info = watcher_app.download_tracker.get_download_info(identifier)
+    assert info is not None
+    assert info["id"] == "945176"
+    assert watcher_app.webhook_notifier.events == []
 
 
 def test_check_download_status_keeps_queued_item_queued_when_no_active_id_assigned(

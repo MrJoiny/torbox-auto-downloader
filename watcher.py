@@ -317,13 +317,6 @@ class TorBoxWatcherApp:
         if any(marker in normalized_state for marker in failure_markers):
             return f"TorBox reported terminal state '{download_state}' without a downloadable file."
 
-        if download_data.get("download_finished") is True:
-            state_for_log = download_state or "unknown"
-            return (
-                "TorBox marked the item finished without a downloadable file "
-                f"(state='{state_for_log}')."
-            )
-
         return None
 
     def _should_run_status_check(self, now=None):

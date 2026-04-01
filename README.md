@@ -2,6 +2,11 @@
 
 Watch-folder downloader for TorBox torrents and NZBs.
 
+If you want a more integrated TorBox bridge for the *arr apps, check out [TorBoxarr](https://github.com/MrJoiny/TorBoxarr).
+
+It speaks qBittorrent and SABnzbd directly, so Sonarr and Radarr can manage downloads the way they normally do instead of relying on a watch folder.
+That means cleaner job history, better failure handling, and a better chance for the *arr app to pick another release when something goes wrong.
+
 ## Docker
 
 The default container flow uses the published image:
